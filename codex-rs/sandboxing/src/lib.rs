@@ -26,7 +26,7 @@ pub use violation::FileSystemSandboxViolationReason;
 pub use violation::NetworkSandboxViolation;
 pub use violation::SandboxViolationEvent;
 pub use violation::classify_filesystem_sandbox_violation;
-pub use violation::is_likely_sandbox_denied;
+pub use violation::is_filesystem_sandbox_violation;
 pub use violation::record_filesystem_sandbox_violation;
 pub use violation::record_network_sandbox_violation;
 pub use violation::record_sandbox_violation;

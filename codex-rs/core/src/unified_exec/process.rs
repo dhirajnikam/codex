@@ -21,6 +21,7 @@ use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_sandboxing::SandboxType;
+use codex_sandboxing::is_filesystem_sandbox_violation;
 use codex_sandboxing::record_filesystem_sandbox_violation;
 use codex_utils_output_truncation::formatted_truncate_text;
 use codex_utils_pty::ExecCommandSession;
@@ -297,7 +298,8 @@ impl UnifiedExecProcess {
             aggregated_output: StreamOutput::new(text.to_string()),
             ..Default::default()
         };
-        if record_filesystem_sandbox_violation(sandbox_type, &exec_output).is_some() {
+        if is_filesystem_sandbox_violation(sandbox_type, &exec_output) {
+            record_filesystem_sandbox_violation(sandbox_type, &exec_output);
             let snippet = formatted_truncate_text(
                 text,
                 TruncationPolicy::Tokens(UNIFIED_EXEC_OUTPUT_MAX_TOKENS),
