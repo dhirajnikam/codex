@@ -6696,6 +6696,16 @@
               }
             ]
           },
+          "default_tools_approval_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AppToolApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "destructive_enabled": {
             "default": true,
             "type": "boolean"
@@ -15424,6 +15434,12 @@
       },
       "ResponseItemMetadata": {
         "properties": {
+          "source_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "turn_id": {
             "type": [
               "string",
