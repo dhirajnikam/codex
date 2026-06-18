@@ -24,6 +24,7 @@ fn resource(environment_id: &str, path: AbsolutePathBuf) -> PluginResourceLocato
 fn environment_descriptor_binds_every_manifest_resource() {
     let root = absolute(std::env::current_dir().expect("cwd").join("plugin-root"));
     let manifest_path = root.join(".codex-plugin/plugin.json");
+    let agents = root.join("agents");
     let skills = root.join("skills");
     let mcp_servers = root.join(".mcp.json");
     let apps = root.join(".app.json");
@@ -37,6 +38,7 @@ fn environment_descriptor_binds_every_manifest_resource() {
         description: None,
         keywords: Vec::new(),
         paths: PluginManifestPaths {
+            agents: vec![agents.clone()],
             skills: vec![skills.clone()],
             mcp_servers: Some(PluginManifestMcpServers::Path(mcp_servers.clone())),
             apps: Some(apps.clone()),
@@ -71,6 +73,7 @@ fn environment_descriptor_binds_every_manifest_resource() {
             description: None,
             keywords: Vec::new(),
             paths: PluginManifestPaths {
+                agents: vec![resource("executor-1", agents)],
                 skills: vec![resource("executor-1", skills)],
                 mcp_servers: Some(PluginManifestMcpServers::Path(resource(
                     "executor-1",
@@ -103,6 +106,7 @@ fn environment_descriptor_rejects_resources_outside_package_root() {
         description: None,
         keywords: Vec::new(),
         paths: PluginManifestPaths {
+            agents: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Some(PluginManifestMcpServers::Path(outside.clone())),
             apps: None,
