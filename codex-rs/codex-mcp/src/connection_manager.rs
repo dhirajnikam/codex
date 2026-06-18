@@ -7,6 +7,7 @@
 //! `codex-core`.
 
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -14,9 +15,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::McpAuthStatusEntry;
-use crate::codex_apps::CodexAppsToolsCacheContext;
-use crate::codex_apps::CodexAppsToolsCacheKey;
-use crate::codex_apps::write_cached_codex_apps_tools_if_needed;
+use crate::codex_apps_cache::CodexAppsToolsCache;
+use crate::codex_apps_cache::CodexAppsToolsCacheKey;
+use crate::codex_apps_cache::CodexAppsToolsFetchSource;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationReviewerHandle;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -129,6 +130,7 @@ impl McpConnectionManager {
         initial_permission_profile: PermissionProfile,
         runtime_context: McpRuntimeContext,
         codex_home: PathBuf,
+        codex_apps_tools_cache: CodexAppsToolsCache,
         codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
         host_owned_codex_apps_enabled: bool,
         prefix_mcp_tool_names: bool,
@@ -173,24 +175,51 @@ impl McpConnectionManager {
                 },
             )
             .await;
-            let codex_apps_tools_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                Some(CodexAppsToolsCacheContext {
-                    codex_home: codex_home.clone(),
-                    user_key: codex_apps_tools_cache_key.clone(),
-                })
+            let configured_config = server.configured_config();
+            // Resolve once, then use the same credential for the cache key and
+            // the MCP client. For built-in Codex Apps, `CODEX_CONNECTORS_TOKEN`
+            // overrides CodexAuth and decides which catalog MCP returns.
+            let resolved_bearer_token = match configured_config.map(|config| &config.transport) {
+                Some(McpServerTransportConfig::StreamableHttp {
+                    bearer_token_env_var,
+                    ..
+                }) => resolve_bearer_token(&server_name, bearer_token_env_var.as_deref()),
+                Some(McpServerTransportConfig::Stdio { .. }) | None => Ok(None),
+            }
+            .map_err(Into::into);
+            let (uses_env_bearer_token, has_env_http_headers) =
+                configured_config.map_or((false, false), |config| match &config.transport {
+                    McpServerTransportConfig::StreamableHttp {
+                        bearer_token_env_var,
+                        env_http_headers,
+                        ..
+                    } => (
+                        bearer_token_env_var.is_some(),
+                        env_http_headers
+                            .as_ref()
+                            .is_some_and(|headers| !headers.is_empty()),
+                    ),
+                    McpServerTransportConfig::Stdio { .. } => (false, false),
+                });
+            // rmcp-client resolves `env_http_headers` later, right before it
+            // sends requests. If a Codex Apps config uses them, do not share a
+            // cache entry keyed only by the env var names.
+            let codex_apps_tools_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME
+                && !has_env_http_headers
+                && let (Ok(resolved_bearer_token), Some(configured_config)) =
+                    (resolved_bearer_token.as_ref(), configured_config)
+            {
+                Some(codex_apps_tools_cache.context(
+                    codex_home.clone(),
+                    codex_apps_tools_cache_key.clone(),
+                    configured_config,
+                    resolved_bearer_token.as_deref(),
+                ))
             } else {
                 None
             };
-            let uses_env_bearer_token =
-                server
-                    .configured_config()
-                    .is_some_and(|config| match &config.transport {
-                        McpServerTransportConfig::StreamableHttp {
-                            bearer_token_env_var,
-                            ..
-                        } => bearer_token_env_var.is_some(),
-                        McpServerTransportConfig::Stdio { .. } => false,
-                    });
+            // If Codex Apps has an env bearer token, that is its auth path. Do
+            // not also attach the ambient CodexAuth provider.
             let runtime_auth_provider =
                 if server_name == CODEX_APPS_MCP_SERVER_NAME && !uses_env_bearer_token {
                     codex_apps_auth_provider.clone()
@@ -209,6 +238,7 @@ impl McpConnectionManager {
                 Arc::clone(&tool_plugin_provenance),
                 runtime_context.clone(),
                 runtime_auth_provider,
+                resolved_bearer_token,
                 client_elicitation_capability.clone(),
                 supports_openai_form_elicitation,
             );
@@ -456,13 +486,13 @@ impl McpConnectionManager {
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
         let mut tools = Vec::new();
         for (server_name, managed_client) in &self.clients {
-            let has_cached_tool_info_snapshot = managed_client.cached_tool_info_snapshot.is_some();
+            let has_cached_tools = managed_client.has_cached_tools();
             let startup_complete = managed_client
                 .startup_complete
                 .load(std::sync::atomic::Ordering::Acquire);
             trace!(
                 server_name = %server_name,
-                has_cached_tool_info_snapshot,
+                has_cached_tools,
                 startup_complete,
                 "waiting for MCP server tools while building tool list"
             );
@@ -471,7 +501,7 @@ impl McpConnectionManager {
                 .instrument(trace_span!(
                     "list_tools_for_server",
                     server_name = %server_name,
-                    has_cached_tool_info_snapshot,
+                    has_cached_tools,
                     startup_complete
                 ))
                 .await
@@ -508,6 +538,10 @@ impl McpConnectionManager {
 
         let list_start = Instant::now();
         let fetch_start = Instant::now();
+        let fetch_ticket = managed_client
+            .codex_apps_tools_cache_context
+            .as_ref()
+            .map(|cache_context| cache_context.begin_fetch(CodexAppsToolsFetchSource::HardRefresh));
         let tools = list_tools_for_client_uncached(
             CODEX_APPS_MCP_SERVER_NAME,
             &managed_client.client,
@@ -524,12 +558,16 @@ impl McpConnectionManager {
             &[],
         );
 
-        write_cached_codex_apps_tools_if_needed(
-            CODEX_APPS_MCP_SERVER_NAME,
-            managed_client.codex_apps_tools_cache_context.as_ref(),
-            &managed_client.server_info,
-            &tools,
-        );
+        let tools =
+            match (
+                managed_client.codex_apps_tools_cache_context.as_ref(),
+                fetch_ticket,
+            ) {
+                (Some(cache_context), Some(fetch_ticket)) => cache_context
+                    .publish_if_newest_accepted(fetch_ticket, &managed_client.server_info, tools),
+                (None, None) => tools,
+                _ => unreachable!("Codex Apps fetch ticket requires cache context"),
+            };
         emit_duration(
             MCP_TOOLS_LIST_DURATION_METRIC,
             list_start.elapsed(),
@@ -857,6 +895,33 @@ impl Drop for McpConnectionManager {
     fn drop(&mut self) {
         self.startup_cancellation_token.cancel();
         self.clients.clear();
+    }
+}
+
+fn resolve_bearer_token(
+    server_name: &str,
+    bearer_token_env_var: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(env_var) = bearer_token_env_var else {
+        return Ok(None);
+    };
+
+    match env::var(env_var) {
+        Ok(value) => {
+            if value.is_empty() {
+                Err(anyhow!(
+                    "Environment variable {env_var} for MCP server '{server_name}' is empty"
+                ))
+            } else {
+                Ok(Some(value))
+            }
+        }
+        Err(env::VarError::NotPresent) => Err(anyhow!(
+            "Environment variable {env_var} for MCP server '{server_name}' is not set"
+        )),
+        Err(env::VarError::NotUnicode(_)) => Err(anyhow!(
+            "Environment variable {env_var} for MCP server '{server_name}' contains invalid Unicode"
+        )),
     }
 }
 

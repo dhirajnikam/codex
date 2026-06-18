@@ -1,11 +1,11 @@
 use super::*;
-use crate::codex_apps::CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION;
-use crate::codex_apps::CodexAppsToolsCacheContext;
-use crate::codex_apps::load_startup_cached_codex_apps_server_info;
-use crate::codex_apps::load_startup_cached_codex_apps_tools_snapshot;
-use crate::codex_apps::read_cached_codex_apps_tools;
-use crate::codex_apps::write_cached_codex_apps_tools;
-use crate::codex_apps::write_cached_codex_apps_tools_if_needed;
+use crate::codex_apps_cache::CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION;
+use crate::codex_apps_cache::CodexAppsToolsCache;
+use crate::codex_apps_cache::CodexAppsToolsCacheContext;
+use crate::codex_apps_cache::load_startup_cached_codex_apps_server_info;
+use crate::codex_apps_cache::read_cached_codex_apps_tools;
+use crate::codex_apps_cache::write_cached_codex_apps_tools;
+use crate::codex_apps_cache::write_cached_codex_apps_tools_for_test;
 use crate::declared_openai_file_input_param_names;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::elicitation_is_rejected_by_policy;
@@ -31,7 +31,10 @@ use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_rmcp_client::InProcessTransportFactory;
+use codex_rmcp_client::RmcpClient;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
 use rmcp::model::CreateElicitationRequestParams;
 use rmcp::model::ElicitationAction;
@@ -41,8 +44,10 @@ use rmcp::model::Meta;
 use rmcp::model::NumberOrString;
 use rmcp::model::Tool;
 use std::collections::HashSet;
+use std::io;
 use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::io::DuplexStream;
 
 fn create_test_tool(server_name: &str, tool_name: &str) -> ToolInfo {
     ToolInfo {
@@ -80,14 +85,14 @@ fn create_codex_apps_tools_cache_context(
     account_id: Option<&str>,
     chatgpt_user_id: Option<&str>,
 ) -> CodexAppsToolsCacheContext {
-    CodexAppsToolsCacheContext {
+    CodexAppsToolsCache::default().context_for_test(
         codex_home,
-        user_key: CodexAppsToolsCacheKey {
+        CodexAppsToolsCacheKey {
             account_id: account_id.map(ToOwned::to_owned),
             chatgpt_user_id: chatgpt_user_id.map(ToOwned::to_owned),
             is_workspace_account: false,
         },
-    }
+    )
 }
 
 fn create_test_server_info(title: &str) -> McpServerInfo {
@@ -98,6 +103,50 @@ fn create_test_server_info(title: &str) -> McpServerInfo {
         description: None,
         icons: None,
         website_url: None,
+    }
+}
+
+struct TestInProcessTransportFactory;
+
+impl InProcessTransportFactory for TestInProcessTransportFactory {
+    fn open(&self) -> BoxFuture<'static, io::Result<DuplexStream>> {
+        async {
+            let (client_stream, _server_stream) = tokio::io::duplex(1);
+            Ok(client_stream)
+        }
+        .boxed()
+    }
+}
+
+async fn create_ready_async_managed_client(tools: Vec<ToolInfo>) -> AsyncManagedClient {
+    let tool_filter = ToolFilter::default();
+    let managed_client = ManagedClient {
+        client: Arc::new(
+            RmcpClient::new_in_process_client(Arc::new(TestInProcessTransportFactory))
+                .await
+                .expect("create in-process RMCP client"),
+        ),
+        server_info: create_test_server_info("Ready"),
+        tools,
+        tool_filter: tool_filter.clone(),
+        tool_timeout: None,
+        server_instructions: None,
+        server_supports_sandbox_state_meta_capability: false,
+        codex_apps_tools_cache_context: None,
+    };
+
+    AsyncManagedClient {
+        client: futures::future::ready::<Result<ManagedClient, StartupOutcomeError>>(Ok(
+            managed_client,
+        ))
+        .boxed()
+        .shared(),
+        cached_server_info: None,
+        codex_apps_tools_cache_context: None,
+        tool_filter,
+        startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+        cancel_token: CancellationToken::new(),
     }
 }
 
@@ -567,12 +616,12 @@ fn codex_apps_tools_cache_is_overwritten_by_last_write() {
     let tools_gateway_1 = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "one")];
     let tools_gateway_2 = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "two")];
 
-    write_cached_codex_apps_tools(&cache_context, &tools_gateway_1);
+    write_cached_codex_apps_tools(&cache_context, &tools_gateway_1).expect("write first cache");
     let cached_gateway_1 =
         read_cached_codex_apps_tools(&cache_context).expect("cache entry exists for first write");
     assert_eq!(cached_gateway_1[0].callable_name, "one");
 
-    write_cached_codex_apps_tools(&cache_context, &tools_gateway_2);
+    write_cached_codex_apps_tools(&cache_context, &tools_gateway_2).expect("write second cache");
     let cached_gateway_2 =
         read_cached_codex_apps_tools(&cache_context).expect("cache entry exists for second write");
     assert_eq!(cached_gateway_2[0].callable_name, "two");
@@ -594,8 +643,10 @@ fn codex_apps_tools_cache_is_scoped_per_user() {
     let tools_user_1 = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "one")];
     let tools_user_2 = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "two")];
 
-    write_cached_codex_apps_tools(&cache_context_user_1, &tools_user_1);
-    write_cached_codex_apps_tools(&cache_context_user_2, &tools_user_2);
+    write_cached_codex_apps_tools(&cache_context_user_1, &tools_user_1)
+        .expect("write user one cache");
+    write_cached_codex_apps_tools(&cache_context_user_2, &tools_user_2)
+        .expect("write user two cache");
 
     let read_user_1 =
         read_cached_codex_apps_tools(&cache_context_user_1).expect("cache entry for user one");
@@ -634,7 +685,7 @@ fn codex_apps_tools_cache_preserves_formerly_disallowed_connectors() {
         ),
     ];
 
-    write_cached_codex_apps_tools(&cache_context, &tools);
+    write_cached_codex_apps_tools(&cache_context, &tools).expect("write cache");
     let cached = read_cached_codex_apps_tools(&cache_context).expect("cache entry exists for user");
 
     assert_eq!(
@@ -694,7 +745,7 @@ fn codex_apps_tools_cache_is_ignored_when_json_is_invalid() {
 #[test]
 fn startup_cached_codex_apps_tools_loads_from_disk_cache() {
     let codex_home = tempdir().expect("tempdir");
-    let cache_context = create_codex_apps_tools_cache_context(
+    let writer_cache_context = create_codex_apps_tools_cache_context(
         codex_home.path().to_path_buf(),
         Some("account-one"),
         Some("user-one"),
@@ -704,18 +755,16 @@ fn startup_cached_codex_apps_tools_loads_from_disk_cache() {
         "calendar_search",
     )];
     let server_info = create_test_server_info("Codex Apps");
-    write_cached_codex_apps_tools_if_needed(
-        CODEX_APPS_MCP_SERVER_NAME,
-        Some(&cache_context),
-        &server_info,
-        &cached_tools,
+    write_cached_codex_apps_tools_for_test(&writer_cache_context, &server_info, &cached_tools);
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
     );
 
-    let startup_tools = load_startup_cached_codex_apps_tools_snapshot(
-        CODEX_APPS_MCP_SERVER_NAME,
-        Some(&cache_context),
-    )
-    .expect("expected startup snapshot to load from cache");
+    let startup_tools = cache_context
+        .current_tools()
+        .expect("expected startup snapshot to load from cache");
     let cached_server_info = load_startup_cached_codex_apps_server_info(
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&cache_context),
@@ -730,12 +779,12 @@ fn startup_cached_codex_apps_tools_loads_from_disk_cache() {
 #[test]
 fn startup_cached_codex_apps_tools_loads_without_server_info_cache() {
     let codex_home = tempdir().expect("tempdir");
-    let cache_context = create_codex_apps_tools_cache_context(
+    let writer_cache_context = create_codex_apps_tools_cache_context(
         codex_home.path().to_path_buf(),
         Some("account-one"),
         Some("user-one"),
     );
-    let cache_path = cache_context.tools_cache_path();
+    let cache_path = writer_cache_context.tools_cache_path();
     if let Some(parent) = cache_path.parent() {
         std::fs::create_dir_all(parent).expect("create parent");
     }
@@ -745,12 +794,15 @@ fn startup_cached_codex_apps_tools_loads_without_server_info_cache() {
     }))
     .expect("serialize");
     std::fs::write(cache_path, bytes).expect("write");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
 
-    let startup_tools = load_startup_cached_codex_apps_tools_snapshot(
-        CODEX_APPS_MCP_SERVER_NAME,
-        Some(&cache_context),
-    )
-    .expect("legacy startup snapshot should remain available");
+    let startup_tools = cache_context
+        .current_tools()
+        .expect("legacy startup snapshot should remain available");
     let cached_server_info = load_startup_cached_codex_apps_server_info(
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&cache_context),
@@ -770,9 +822,8 @@ fn codex_apps_server_info_cache_survives_legacy_tools_cache_write() {
         Some("user-one"),
     );
     let server_info = create_test_server_info("Codex Apps");
-    write_cached_codex_apps_tools_if_needed(
-        CODEX_APPS_MCP_SERVER_NAME,
-        Some(&cache_context),
+    write_cached_codex_apps_tools_for_test(
+        &cache_context,
         &server_info,
         &[create_test_tool(
             CODEX_APPS_MCP_SERVER_NAME,
@@ -790,29 +841,220 @@ fn codex_apps_server_info_cache_survives_legacy_tools_cache_write() {
     }))
     .expect("serialize");
     std::fs::write(cache_path, bytes).expect("write legacy tools cache");
+    let startup_cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
 
     assert_eq!(
         load_startup_cached_codex_apps_server_info(
             CODEX_APPS_MCP_SERVER_NAME,
-            Some(&cache_context),
+            Some(&startup_cache_context),
         ),
         Some(server_info)
     );
-    assert!(
-        load_startup_cached_codex_apps_tools_snapshot(
-            CODEX_APPS_MCP_SERVER_NAME,
-            Some(&cache_context),
+    assert!(startup_cache_context.current_tools().is_none());
+}
+
+#[test]
+fn codex_apps_tools_cache_context_does_not_reread_disk_after_creation() {
+    let codex_home = tempdir().expect("tempdir");
+    let writer_cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    let cached_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "cached")];
+    write_cached_codex_apps_tools(&writer_cache_context, &cached_tools).expect("write cache");
+    let reader_cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    let updated_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "updated")];
+    write_cached_codex_apps_tools(&writer_cache_context, &updated_tools).expect("rewrite cache");
+
+    assert_eq!(
+        reader_cache_context
+            .current_tools()
+            .expect("in-memory tools")[0]
+            .callable_name,
+        "cached"
+    );
+    assert_eq!(
+        read_cached_codex_apps_tools(&writer_cache_context).expect("disk tools")[0].callable_name,
+        "updated"
+    );
+}
+
+#[test]
+fn codex_apps_tools_cache_publishes_newest_shared_snapshot() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache = CodexAppsToolsCache::default();
+    let cache_context_1 = cache.context_for_test(
+        codex_home.path().to_path_buf(),
+        CodexAppsToolsCacheKey {
+            account_id: Some("account-one".to_string()),
+            chatgpt_user_id: Some("user-one".to_string()),
+            is_workspace_account: false,
+        },
+    );
+    let cache_context_2 = cache.context_for_test(
+        codex_home.path().to_path_buf(),
+        CodexAppsToolsCacheKey {
+            account_id: Some("account-one".to_string()),
+            chatgpt_user_id: Some("user-one".to_string()),
+            is_workspace_account: false,
+        },
+    );
+    let older_ticket =
+        cache_context_1.begin_fetch(crate::codex_apps_cache::CodexAppsToolsFetchSource::Startup);
+    let newer_ticket = cache_context_2
+        .begin_fetch(crate::codex_apps_cache::CodexAppsToolsFetchSource::HardRefresh);
+    let server_info = create_test_server_info("Codex Apps");
+    let newer_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "newer")];
+    let older_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "older")];
+
+    let published_tools =
+        cache_context_2.publish_if_newest_accepted(newer_ticket, &server_info, newer_tools);
+    assert_eq!(
+        model_tool_names(&published_tools),
+        model_tool_names(
+            &cache_context_1
+                .current_tools()
+                .expect("new snapshot should publish")
         )
-        .is_none()
+    );
+    let current_tools =
+        cache_context_1.publish_if_newest_accepted(older_ticket, &server_info, older_tools);
+
+    assert_eq!(current_tools[0].callable_name, "newer");
+    assert_eq!(
+        cache_context_2.current_tools().expect("shared snapshot")[0].callable_name,
+        "newer"
+    );
+    assert_eq!(
+        read_cached_codex_apps_tools(&cache_context_1).expect("persisted snapshot")[0]
+            .callable_name,
+        "newer"
+    );
+}
+
+#[test]
+fn codex_apps_tools_cache_keeps_live_publish_when_disk_persistence_fails() {
+    let codex_home = tempdir().expect("tempdir");
+    let codex_home_file = codex_home.path().join("not-a-directory");
+    std::fs::write(&codex_home_file, b"occupied").expect("create codex home file");
+    let cache_context = CodexAppsToolsCache::default().context_for_test(
+        codex_home_file,
+        CodexAppsToolsCacheKey {
+            account_id: Some("account-one".to_string()),
+            chatgpt_user_id: Some("user-one".to_string()),
+            is_workspace_account: false,
+        },
+    );
+    let tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "live")];
+    let published_tools = cache_context.publish_if_newest_accepted(
+        cache_context.begin_fetch(crate::codex_apps_cache::CodexAppsToolsFetchSource::HardRefresh),
+        &create_test_server_info("Codex Apps"),
+        tools.clone(),
+    );
+
+    assert_eq!(model_tool_names(&published_tools), model_tool_names(&tools));
+    assert_eq!(
+        model_tool_names(&cache_context.current_tools().expect("live snapshot")),
+        model_tool_names(&tools)
+    );
+}
+
+#[test]
+fn codex_apps_tools_cache_scopes_env_token_principals_without_leaking_tokens() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache = CodexAppsToolsCache::default();
+    let config = crate::codex_apps_mcp_server_config(
+        "https://chatgpt.com",
+        /*apps_mcp_product_sku*/ None,
+    );
+    let auth_key = CodexAppsToolsCacheKey {
+        account_id: Some("account-one".to_string()),
+        chatgpt_user_id: Some("user-one".to_string()),
+        is_workspace_account: false,
+    };
+    let token_one = "token-one";
+    let token_two = "token-two";
+    let token_one_context = cache.context(
+        codex_home.path().to_path_buf(),
+        auth_key.clone(),
+        &config,
+        Some(token_one),
+    );
+    let token_two_context = cache.context(
+        codex_home.path().to_path_buf(),
+        auth_key,
+        &config,
+        Some(token_two),
+    );
+
+    assert_ne!(
+        token_one_context.tools_cache_path(),
+        token_two_context.tools_cache_path()
+    );
+    let token_one_path = token_one_context
+        .tools_cache_path()
+        .to_string_lossy()
+        .into_owned();
+    let token_two_path = token_two_context
+        .tools_cache_path()
+        .to_string_lossy()
+        .into_owned();
+    assert!(!token_one_path.contains(token_one));
+    assert!(!token_two_path.contains(token_two));
+}
+
+#[test]
+fn codex_apps_tools_cache_scopes_catalog_sources() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache = CodexAppsToolsCache::default();
+    let auth_key = CodexAppsToolsCacheKey {
+        account_id: Some("account-one".to_string()),
+        chatgpt_user_id: Some("user-one".to_string()),
+        is_workspace_account: false,
+    };
+    let default_context = cache.context(
+        codex_home.path().to_path_buf(),
+        auth_key.clone(),
+        &crate::codex_apps_mcp_server_config(
+            "https://chatgpt.com",
+            /*apps_mcp_product_sku*/ None,
+        ),
+        /*resolved_bearer_token*/ None,
+    );
+    let sku_context = cache.context(
+        codex_home.path().to_path_buf(),
+        auth_key,
+        &crate::codex_apps_mcp_server_config("https://chatgpt.com", Some("sku")),
+        /*resolved_bearer_token*/ None,
+    );
+
+    assert_ne!(
+        default_context.tools_cache_path(),
+        sku_context.tools_cache_path()
     );
 }
 
 #[tokio::test]
-async fn list_all_tools_uses_cached_tool_info_snapshot_while_client_is_pending() {
-    let startup_tools = vec![create_test_tool(
+async fn list_all_tools_uses_shared_codex_apps_cache_while_client_is_pending() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    cache_context.store_current_tools_for_test(vec![create_test_tool(
         CODEX_APPS_MCP_SERVER_NAME,
         "calendar_create_event",
-    )];
+    )]);
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
         .shared();
@@ -827,8 +1069,9 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_while_client_is_pending()
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: None,
+            codex_apps_tools_cache_context: Some(cache_context),
+            tool_filter: ToolFilter::default(),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             cancel_token: CancellationToken::new(),
@@ -842,7 +1085,7 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_while_client_is_pending()
             tool.canonical_tool_name()
                 == ToolName::namespaced("mcp__codex_apps", "calendar_create_event")
         })
-        .expect("tool from startup cache");
+        .expect("tool from shared cache");
     assert_eq!(tool.server_name, CODEX_APPS_MCP_SERVER_NAME);
     assert_eq!(tool.callable_name, "calendar_create_event");
 }
@@ -864,8 +1107,9 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: Some(Vec::new()),
             cached_server_info: Some(server_info.clone()),
+            codex_apps_tools_cache_context: None,
+            tool_filter: ToolFilter::default(),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             cancel_token: CancellationToken::new(),
@@ -886,10 +1130,8 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
 
 #[tokio::test]
 async fn list_all_tools_accepts_canonical_namespaced_tool_names() {
-    let startup_tools = vec![create_test_tool("rmcp", "echo")];
-    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-        .boxed()
-        .shared();
+    let managed_client =
+        create_ready_async_managed_client(vec![create_test_tool("rmcp", "echo")]).await;
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionManager::new_uninitialized(
@@ -897,17 +1139,7 @@ async fn list_all_tools_accepts_canonical_namespaced_tool_names() {
         &permission_profile,
         /*prefix_mcp_tool_names*/ false,
     );
-    manager.clients.insert(
-        "rmcp".to_string(),
-        AsyncManagedClient {
-            client: pending_client,
-            cached_tool_info_snapshot: Some(startup_tools),
-            cached_server_info: None,
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
-            cancel_token: CancellationToken::new(),
-        },
-    );
+    manager.clients.insert("rmcp".to_string(), managed_client);
 
     let tools = manager.list_all_tools().await;
     let tool = tools
@@ -929,10 +1161,8 @@ async fn list_all_tools_accepts_canonical_namespaced_tool_names() {
 
 #[tokio::test]
 async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
-    let startup_tools = vec![create_test_tool("rmcp", "echo")];
-    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-        .boxed()
-        .shared();
+    let managed_client =
+        create_ready_async_managed_client(vec![create_test_tool("rmcp", "echo")]).await;
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionManager::new_uninitialized(
@@ -940,17 +1170,7 @@ async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
         &permission_profile,
         /*prefix_mcp_tool_names*/ true,
     );
-    manager.clients.insert(
-        "rmcp".to_string(),
-        AsyncManagedClient {
-            client: pending_client,
-            cached_tool_info_snapshot: Some(startup_tools),
-            cached_server_info: None,
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
-            cancel_token: CancellationToken::new(),
-        },
-    );
+    manager.clients.insert("rmcp".to_string(), managed_client);
 
     let tools = manager.list_all_tools().await;
     let tool = tools
@@ -971,7 +1191,7 @@ async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
 }
 
 #[tokio::test]
-async fn list_all_tools_blocks_while_client_is_pending_without_cached_tool_info_snapshot() {
+async fn list_all_tools_blocks_while_client_is_pending_without_cached_tools() {
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
         .shared();
@@ -986,8 +1206,9 @@ async fn list_all_tools_blocks_while_client_is_pending_without_cached_tool_info_
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: None,
             cached_server_info: None,
+            codex_apps_tools_cache_context: None,
+            tool_filter: ToolFilter::default(),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             cancel_token: CancellationToken::new(),
@@ -1022,8 +1243,9 @@ async fn shutdown_cancels_pending_tool_listing() {
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: None,
             cached_server_info: None,
+            codex_apps_tools_cache_context: None,
+            tool_filter: ToolFilter::default(),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             cancel_token,
@@ -1042,7 +1264,14 @@ async fn shutdown_cancels_pending_tool_listing() {
 }
 
 #[tokio::test]
-async fn list_all_tools_does_not_block_when_cached_tool_info_snapshot_is_empty() {
+async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    cache_context.store_current_tools_for_test(Vec::new());
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
         .shared();
@@ -1057,8 +1286,9 @@ async fn list_all_tools_does_not_block_when_cached_tool_info_snapshot_is_empty()
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: pending_client,
-            cached_tool_info_snapshot: Some(Vec::new()),
             cached_server_info: None,
+            codex_apps_tools_cache_context: Some(cache_context),
+            tool_filter: ToolFilter::default(),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             cancel_token: CancellationToken::new(),
@@ -1067,16 +1297,22 @@ async fn list_all_tools_does_not_block_when_cached_tool_info_snapshot_is_empty()
 
     let timeout_result =
         tokio::time::timeout(Duration::from_millis(10), manager.list_all_tools()).await;
-    let tools = timeout_result.expect("cache-hit startup snapshot should not block");
+    let tools = timeout_result.expect("shared empty cache should not block");
     assert!(tools.is_empty());
 }
 
 #[tokio::test]
-async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails() {
-    let startup_tools = vec![create_test_tool(
+async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    cache_context.store_current_tools_for_test(vec![create_test_tool(
         CODEX_APPS_MCP_SERVER_NAME,
         "calendar_create_event",
-    )];
+    )]);
     let server_info = create_test_server_info("Codex Apps");
     let failed_client = futures::future::ready::<Result<ManagedClient, StartupOutcomeError>>(Err(
         StartupOutcomeError::Failed {
@@ -1097,8 +1333,9 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
             client: failed_client,
-            cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: Some(server_info.clone()),
+            codex_apps_tools_cache_context: Some(cache_context),
+            tool_filter: ToolFilter::default(),
             startup_complete,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             cancel_token: CancellationToken::new(),
@@ -1112,7 +1349,7 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails
             tool.canonical_tool_name()
                 == ToolName::namespaced("mcp__codex_apps", "calendar_create_event")
         })
-        .expect("tool from startup cache");
+        .expect("tool from shared cache");
     assert_eq!(tool.server_name, CODEX_APPS_MCP_SERVER_NAME);
     assert_eq!(tool.callable_name, "calendar_create_event");
     assert_eq!(
@@ -1125,12 +1362,10 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails
 }
 
 #[tokio::test]
-async fn list_all_tools_adds_server_metadata_to_cached_tools() {
+async fn list_all_tools_adds_server_metadata_to_tools() {
     let server_name = "docs";
-    let startup_tools = vec![create_test_tool(server_name, "search")];
-    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-        .boxed()
-        .shared();
+    let managed_client =
+        create_ready_async_managed_client(vec![create_test_tool(server_name, "search")]).await;
     let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionManager::new_uninitialized(
@@ -1151,17 +1386,9 @@ async fn list_all_tools_adds_server_metadata_to_cached_tools() {
             tool_approval_modes: HashMap::new(),
         },
     );
-    manager.clients.insert(
-        server_name.to_string(),
-        AsyncManagedClient {
-            client: pending_client,
-            cached_tool_info_snapshot: Some(startup_tools),
-            cached_server_info: None,
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
-            cancel_token: CancellationToken::new(),
-        },
-    );
+    manager
+        .clients
+        .insert(server_name.to_string(), managed_client);
 
     let tools = manager.list_all_tools().await;
     assert_eq!(tools.len(), 1);
@@ -1271,6 +1498,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
             PathBuf::from("/tmp"),
         ),
         codex_home.path().to_path_buf(),
+        CodexAppsToolsCache::default(),
         CodexAppsToolsCacheKey {
             account_id: None,
             chatgpt_user_id: None,
