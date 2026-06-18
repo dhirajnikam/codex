@@ -157,11 +157,13 @@ fn bundle_layers_preserve_managed_bucket_presence_and_order() {
             .map(|layer| layer.name)
             .collect::<Vec<_>>(),
         vec![
-            ConfigLayerSource::EnterpriseManaged {
+            ConfigLayerSource::CloudManaged {
+                layer: CloudManagedLayer::Baseline,
                 id: "baseline_low".to_string(),
                 name: "Baseline low".to_string(),
             },
-            ConfigLayerSource::EnterpriseManaged {
+            ConfigLayerSource::CloudManaged {
+                layer: CloudManagedLayer::Baseline,
                 id: "baseline_high".to_string(),
                 name: "Baseline high".to_string(),
             },

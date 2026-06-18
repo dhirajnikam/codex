@@ -11,6 +11,9 @@ pub fn format_config_layer_source(source: &ConfigLayerSource, config_toml_file: 
         ConfigLayerSource::EnterpriseManaged { id, name } => {
             format!("enterprise-managed ({name}, {id})")
         }
+        ConfigLayerSource::CloudManaged { layer, id, name } => {
+            format!("cloud-managed {layer} ({name}, {id})")
+        }
         ConfigLayerSource::User { file, .. } => {
             format!("user ({})", file.as_path().display())
         }
