@@ -4992,7 +4992,8 @@
     "ConversationTextRole": {
       "enum": [
         "user",
-        "developer"
+        "developer",
+        "assistant"
       ],
       "type": "string"
     },
@@ -7437,6 +7438,10 @@
         "experimentalApi": {
           "default": false,
           "description": "Opt into receiving experimental API methods and fields.",
+          "type": "boolean"
+        },
+        "mcpServerOpenaiFormElicitation": {
+          "description": "Allow downstream MCP servers to request OpenAI extended form elicitations.",
           "type": "boolean"
         },
         "optOutNotificationMethods": {
@@ -11236,13 +11241,6 @@
               },
               "type": "array"
             },
-            "id": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "writeOnly": true
-            },
             "metadata": {
               "anyOf": [
                 {
@@ -11384,14 +11382,6 @@
                 "null"
               ]
             },
-            "id": {
-              "description": "Legacy id field retained for compatibility with older payloads.",
-              "type": [
-                "string",
-                "null"
-              ],
-              "writeOnly": true
-            },
             "metadata": {
               "anyOf": [
                 {
@@ -11428,13 +11418,6 @@
             },
             "call_id": {
               "type": "string"
-            },
-            "id": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "writeOnly": true
             },
             "metadata": {
               "anyOf": [
@@ -11483,13 +11466,6 @@
             },
             "execution": {
               "type": "string"
-            },
-            "id": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "writeOnly": true
             },
             "metadata": {
               "anyOf": [
@@ -11561,13 +11537,6 @@
           "properties": {
             "call_id": {
               "type": "string"
-            },
-            "id": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "writeOnly": true
             },
             "input": {
               "type": "string"
@@ -11705,13 +11674,6 @@
                 }
               ]
             },
-            "id": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "writeOnly": true
-            },
             "metadata": {
               "anyOf": [
                 {
@@ -11745,7 +11707,11 @@
         {
           "properties": {
             "id": {
-              "type": "string"
+              "description": "Existing provider ID retained on serialized history for compatibility.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "metadata": {
               "anyOf": [
@@ -11778,7 +11744,6 @@
             }
           },
           "required": [
-            "id",
             "result",
             "status",
             "type"
@@ -15231,7 +15196,7 @@
             "cwd": {
               "allOf": [
                 {
-                  "$ref": "#/definitions/AbsolutePathBuf"
+                  "$ref": "#/definitions/LegacyAppPathString"
                 }
               ],
               "description": "The command's working directory."

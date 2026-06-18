@@ -1,6 +1,7 @@
 use crate::app_mcp_routing::apply_app_mcp_routing_policy;
 use crate::app_mcp_routing::apps_route_available;
 use crate::is_openai_curated_marketplace_name;
+use crate::manifest::PluginManifest;
 use crate::manifest::PluginManifestHooks;
 use crate::manifest::PluginManifestMcpServers;
 use crate::manifest::PluginManifestPaths;
@@ -664,6 +665,7 @@ async fn load_plugin(
     let mut loaded_plugin = LoadedPlugin {
         config_name,
         manifest_name: None,
+        plugin_namespace: None,
         manifest_description: None,
         root,
         enabled: plugin.enabled,
@@ -706,6 +708,7 @@ async fn load_plugin(
     };
 
     let manifest_paths = &manifest.paths;
+    loaded_plugin.plugin_namespace = Some(manifest.name.clone());
     match scope {
         PluginLoadScope::AllCapabilities {
             restriction_product,
@@ -717,7 +720,7 @@ async fn load_plugin(
             let resolved_skills = load_plugin_skills(
                 &plugin_root,
                 &loaded_plugin_id,
-                manifest_paths,
+                &manifest,
                 *restriction_product,
                 skill_config_rules,
             )
@@ -765,6 +768,29 @@ fn apply_plugin_mcp_server_policy(config: &mut McpServerConfig, policy: &PluginM
     }
 }
 
+pub(crate) struct PluginSkillInventory {
+    skills: Vec<SkillMetadata>,
+    had_errors: bool,
+}
+
+impl PluginSkillInventory {
+    pub(crate) fn has_enabled_skills(&self, skill_config_rules: &SkillConfigRules) -> bool {
+        contains_enabled_skill(
+            &self.skills,
+            &resolve_disabled_skill_paths(&self.skills, skill_config_rules),
+        )
+    }
+
+    fn resolve(self, skill_config_rules: &SkillConfigRules) -> ResolvedPluginSkills {
+        let disabled_skill_paths = resolve_disabled_skill_paths(&self.skills, skill_config_rules);
+        ResolvedPluginSkills {
+            skills: self.skills,
+            disabled_skill_paths,
+            had_errors: self.had_errors,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedPluginSkills {
     pub skills: Vec<SkillMetadata>,
@@ -774,28 +800,45 @@ pub struct ResolvedPluginSkills {
 
 impl ResolvedPluginSkills {
     pub fn has_enabled_skills(&self) -> bool {
-        self.had_errors
-            || self
-                .skills
-                .iter()
-                .any(|skill| !self.disabled_skill_paths.contains(&skill.path_to_skills_md))
+        self.had_errors || contains_enabled_skill(&self.skills, &self.disabled_skill_paths)
     }
+}
+
+fn contains_enabled_skill(
+    skills: &[SkillMetadata],
+    disabled_skill_paths: &HashSet<AbsolutePathBuf>,
+) -> bool {
+    skills
+        .iter()
+        .any(|skill| !disabled_skill_paths.contains(&skill.path_to_skills_md))
 }
 
 pub async fn load_plugin_skills(
     plugin_root: &AbsolutePathBuf,
     plugin_id: &PluginId,
-    manifest_paths: &PluginManifestPaths,
+    manifest: &PluginManifest,
     restriction_product: Option<Product>,
     skill_config_rules: &SkillConfigRules,
 ) -> ResolvedPluginSkills {
-    let roots = plugin_skill_roots(plugin_root, manifest_paths)
+    load_plugin_skill_inventory(plugin_root, plugin_id, manifest, restriction_product)
+        .await
+        .resolve(skill_config_rules)
+}
+
+pub(crate) async fn load_plugin_skill_inventory(
+    plugin_root: &AbsolutePathBuf,
+    plugin_id: &PluginId,
+    manifest: &PluginManifest,
+    restriction_product: Option<Product>,
+) -> PluginSkillInventory {
+    let roots = plugin_skill_roots(plugin_root, &manifest.paths)
         .into_iter()
         .map(|path| SkillRoot {
             path,
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
             plugin_id: Some(plugin_id.as_key()),
+            plugin_namespace: Some(manifest.name.clone()),
             plugin_root: Some(plugin_root.clone()),
         })
         .collect::<Vec<_>>();
@@ -806,23 +849,19 @@ pub async fn load_plugin_skills(
         .into_iter()
         .filter(|skill| skill.matches_product_restriction_for_product(restriction_product))
         .collect::<Vec<_>>();
-    let disabled_skill_paths = resolve_disabled_skill_paths(&skills, skill_config_rules);
 
-    ResolvedPluginSkills {
-        skills,
-        disabled_skill_paths,
-        had_errors,
-    }
+    PluginSkillInventory { skills, had_errors }
 }
 
 fn plugin_skill_roots(
     plugin_root: &AbsolutePathBuf,
     manifest_paths: &PluginManifestPaths,
 ) -> Vec<AbsolutePathBuf> {
-    let mut paths = default_skill_roots(plugin_root);
-    if let Some(path) = &manifest_paths.skills {
-        paths.push(path.clone());
-    }
+    let mut paths = if manifest_paths.skills.is_empty() {
+        default_skill_roots(plugin_root)
+    } else {
+        manifest_paths.skills.clone()
+    };
     paths.sort_unstable();
     paths.dedup();
     paths
