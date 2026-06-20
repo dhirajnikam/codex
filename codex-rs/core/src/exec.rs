@@ -390,6 +390,7 @@ pub fn build_exec_request(
             enforce_managed_network,
             environment_id: network_environment_id.as_deref(),
             network: network.as_ref(),
+            sites_preview: false,
             sandbox_policy_cwd: &sandbox_policy_cwd_uri,
             codex_linux_sandbox_exe: codex_linux_sandbox_exe.as_deref(),
             use_legacy_landlock,
@@ -442,6 +443,7 @@ pub(crate) async fn execute_exec_request(
         cwd,
         env,
         exec_server_env_config: _,
+        sites_preview,
         network,
         expiration,
         capture_policy,
@@ -457,6 +459,11 @@ pub(crate) async fn execute_exec_request(
         network_environment_id,
         arg0,
     } = exec_request;
+    if sites_preview {
+        return Err(CodexErr::UnsupportedOperation(
+            "Sites preview requires exec-server".to_string(),
+        ));
+    }
 
     // TODO(anp): Keep PathUri through the local process launch boundary.
     let cwd = cwd

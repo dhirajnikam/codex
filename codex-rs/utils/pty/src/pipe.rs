@@ -274,6 +274,27 @@ pub async fn spawn_process(
     spawn_process_with_stdin_mode(program, args, cwd, env, arg0, PipeStdinMode::Piped, &[]).await
 }
 
+/// Spawn a process using regular pipes and preserve selected inherited file descriptors.
+pub async fn spawn_process_with_inherited_fds(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    arg0: &Option<String>,
+    inherited_fds: &[i32],
+) -> Result<SpawnedProcess> {
+    spawn_process_with_stdin_mode(
+        program,
+        args,
+        cwd,
+        env,
+        arg0,
+        PipeStdinMode::Piped,
+        inherited_fds,
+    )
+    .await
+}
+
 /// Spawn a process using regular pipes, but close stdin immediately.
 pub async fn spawn_process_no_stdin(
     program: &str,

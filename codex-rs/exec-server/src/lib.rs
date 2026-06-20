@@ -27,6 +27,8 @@ mod rpc;
 mod runtime_paths;
 mod sandboxed_file_system;
 mod server;
+#[cfg(unix)]
+mod sites_preview;
 
 pub use client::ExecServerClient;
 pub use client::ExecServerError;

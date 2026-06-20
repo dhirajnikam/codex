@@ -53,6 +53,10 @@ use crate::rpc::RpcServerOutboundMessage;
 use crate::rpc::internal_error;
 use crate::rpc::invalid_params;
 use crate::rpc::invalid_request;
+#[cfg(unix)]
+use crate::sites_preview::SitesPreviewListener;
+#[cfg(unix)]
+use crate::sites_preview::SitesPreviewListenerError;
 
 const RETAINED_OUTPUT_BYTES_PER_PROCESS: usize = 1024 * 1024;
 const NOTIFICATION_CHANNEL_CAPACITY: usize = 256;
@@ -76,6 +80,8 @@ struct RunningProcess {
     tty: bool,
     pipe_stdin: bool,
     accepted_stdin_write_ids: Arc<Mutex<AcceptedStdinWriteIds>>,
+    #[cfg(unix)]
+    sites_preview: Option<SitesPreviewListener>,
     output: VecDeque<RetainedOutputChunk>,
     retained_bytes: usize,
     next_seq: u64,
@@ -216,33 +222,62 @@ impl LocalProcess {
             );
         }
 
-        let env = child_env(&params);
+        let mut env = child_env(&params);
+        #[cfg(unix)]
+        let sites_preview = match SitesPreviewListener::prepare(params.sites_preview) {
+            Ok(sites_preview) => sites_preview,
+            Err(error) => {
+                remove_starting_process(&self.inner, &process_id, &start).await;
+                return Err(sites_preview_error(error));
+            }
+        };
+        #[cfg(unix)]
+        let inherited_fds = sites_preview
+            .as_ref()
+            .map(|sites_preview| vec![sites_preview.inherited_fd()])
+            .unwrap_or_default();
+        #[cfg(unix)]
+        if let Some(sites_preview) = sites_preview.as_ref() {
+            sites_preview.add_to_child_env(&mut env);
+        }
+        #[cfg(not(unix))]
+        if params.sites_preview {
+            remove_starting_process(&self.inner, &process_id, &start).await;
+            return Err(invalid_params(
+                "Sites preview is only supported on Unix exec-server hosts".to_string(),
+            ));
+        }
+        #[cfg(not(unix))]
+        let inherited_fds = Vec::new();
         let spawned_result = if params.tty {
-            codex_utils_pty::spawn_pty_process(
+            codex_utils_pty::pty::spawn_process_with_inherited_fds(
                 program,
                 args,
                 native_cwd.as_path(),
                 &env,
                 &params.arg0,
                 TerminalSize::default(),
+                &inherited_fds,
             )
             .await
         } else if params.pipe_stdin {
-            codex_utils_pty::spawn_pipe_process(
+            codex_utils_pty::pipe::spawn_process_with_inherited_fds(
                 program,
                 args,
                 native_cwd.as_path(),
                 &env,
                 &params.arg0,
+                &inherited_fds,
             )
             .await
         } else {
-            codex_utils_pty::spawn_pipe_process_no_stdin(
+            codex_utils_pty::pipe::spawn_process_no_stdin_with_inherited_fds(
                 program,
                 args,
                 native_cwd.as_path(),
                 &env,
                 &params.arg0,
+                &inherited_fds,
             )
             .await
         };
@@ -287,6 +322,8 @@ impl LocalProcess {
                     accepted_stdin_write_ids: Arc::new(
                         Mutex::new(AcceptedStdinWriteIds::default()),
                     ),
+                    #[cfg(unix)]
+                    sites_preview,
                     output: VecDeque::new(),
                     retained_bytes: 0,
                     next_seq: 1,
@@ -541,6 +578,32 @@ fn child_env(params: &ExecParams) -> HashMap<String, String> {
     env
 }
 
+async fn remove_starting_process(
+    inner: &Arc<Inner>,
+    process_id: &ProcessId,
+    start: &Arc<ProcessStart>,
+) {
+    let mut process_map = inner.processes.lock().await;
+    if matches!(
+        process_map.get(process_id),
+        Some(ProcessEntry::Starting(current)) if Arc::ptr_eq(current, start)
+    ) {
+        process_map.remove(process_id);
+    }
+}
+
+#[cfg(unix)]
+fn sites_preview_error(error: SitesPreviewListenerError) -> JSONRPCErrorError {
+    match error {
+        SitesPreviewListenerError::PortInUse => invalid_request(
+            "Sites preview port 4173 is already in use by another process".to_string(),
+        ),
+        SitesPreviewListenerError::Io(error) => {
+            internal_error(format!("failed to prepare Sites preview listener: {error}"))
+        }
+    }
+}
+
 fn shell_environment_policy(env_policy: &ExecEnvPolicy) -> ShellEnvironmentPolicy {
     ShellEnvironmentPolicy {
         inherit: env_policy.inherit.clone(),
@@ -786,6 +849,8 @@ async fn watch_exit(
             let seq = process.next_seq;
             process.next_seq += 1;
             process.exit_code = Some(exit_code);
+            #[cfg(unix)]
+            let _ = process.sites_preview.take();
             let _ = process.wake_tx.send(seq);
             process
                 .events
@@ -901,6 +966,7 @@ mod tests {
             env,
             tty: false,
             pipe_stdin: false,
+            sites_preview: false,
             arg0: None,
         }
     }
@@ -1096,6 +1162,8 @@ mod tests {
                 tty: false,
                 pipe_stdin: false,
                 accepted_stdin_write_ids: Arc::new(Mutex::new(AcceptedStdinWriteIds::default())),
+                #[cfg(unix)]
+                sites_preview: None,
                 output: VecDeque::new(),
                 retained_bytes: 0,
                 next_seq: 1,

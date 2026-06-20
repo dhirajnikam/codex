@@ -32,6 +32,7 @@ fn exec_params_with_argv(process_id: &str, argv: Vec<String>) -> ExecParams {
         env: inherited_path_env(),
         tty: false,
         pipe_stdin: false,
+        sites_preview: false,
         arg0: None,
     }
 }

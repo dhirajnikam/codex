@@ -426,6 +426,7 @@ impl<'a> SandboxAttempt<'a> {
         command: SandboxCommand,
         options: ExecOptions,
         network: Option<&NetworkProxy>,
+        sites_preview: bool,
         environment_id: Option<&str>,
     ) -> Result<crate::sandboxing::ExecRequest, CodexErr> {
         let request = self
@@ -437,6 +438,7 @@ impl<'a> SandboxAttempt<'a> {
                 enforce_managed_network: self.enforce_managed_network,
                 environment_id,
                 network,
+                sites_preview,
                 sandbox_policy_cwd: self.sandbox_cwd,
                 codex_linux_sandbox_exe: self
                     .codex_linux_sandbox_exe
@@ -458,6 +460,7 @@ impl<'a> SandboxAttempt<'a> {
         command: SandboxCommand,
         options: ExecOptions,
         network: Option<&NetworkProxy>,
+        sites_preview: bool,
         environment_id: Option<&str>,
     ) -> Result<crate::sandboxing::ExecRequest, CodexErr> {
         let request = self
@@ -470,6 +473,7 @@ impl<'a> SandboxAttempt<'a> {
                 enforce_managed_network: self.enforce_managed_network,
                 environment_id,
                 network,
+                sites_preview,
                 sandbox_policy_cwd: self.sandbox_cwd,
                 codex_linux_sandbox_exe: None,
                 use_legacy_landlock: self.use_legacy_landlock,

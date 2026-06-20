@@ -99,6 +99,7 @@ fn unsandboxed_transform_preserves_foreign_cwd_and_unrestricted_file_system_poli
             enforce_managed_network: false,
             environment_id: None,
             network: None,
+            sites_preview: false,
             sandbox_policy_cwd: &cwd_uri,
             codex_linux_sandbox_exe: None,
             use_legacy_landlock: false,
@@ -154,6 +155,7 @@ fn transform_additional_permissions_enable_network_for_external_sandbox() {
             enforce_managed_network: false,
             environment_id: None,
             network: None,
+            sites_preview: false,
             sandbox_policy_cwd: &cwd_uri,
             codex_linux_sandbox_exe: None,
             use_legacy_landlock: false,
@@ -224,6 +226,7 @@ fn transform_additional_permissions_preserves_denied_entries() {
             enforce_managed_network: false,
             environment_id: None,
             network: None,
+            sites_preview: false,
             sandbox_policy_cwd: &cwd_uri,
             codex_linux_sandbox_exe: None,
             use_legacy_landlock: false,
@@ -321,6 +324,7 @@ fn transform_linux_seccomp_request(
             enforce_managed_network: false,
             environment_id: None,
             network: None,
+            sites_preview: false,
             sandbox_policy_cwd: &cwd_uri,
             codex_linux_sandbox_exe: Some(codex_linux_sandbox_exe),
             use_legacy_landlock: false,
@@ -345,6 +349,7 @@ fn wsl1_rejects_linux_bubblewrap_path() {
             &restricted_policy,
             /*use_legacy_landlock*/ false,
             /*allow_network_for_proxy*/ false,
+            /*sites_preview*/ false,
             /*is_wsl1*/ true,
         ),
         Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
@@ -354,6 +359,7 @@ fn wsl1_rejects_linux_bubblewrap_path() {
             &FileSystemSandboxPolicy::unrestricted(),
             /*use_legacy_landlock*/ false,
             /*allow_network_for_proxy*/ true,
+            /*sites_preview*/ false,
             /*is_wsl1*/ true,
         ),
         Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
@@ -363,6 +369,7 @@ fn wsl1_rejects_linux_bubblewrap_path() {
             &FileSystemSandboxPolicy::unrestricted(),
             /*use_legacy_landlock*/ true,
             /*allow_network_for_proxy*/ true,
+            /*sites_preview*/ false,
             /*is_wsl1*/ true,
         ),
         Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
@@ -377,6 +384,7 @@ fn wsl1_allows_non_bubblewrap_linux_paths() {
             &FileSystemSandboxPolicy::unrestricted(),
             /*use_legacy_landlock*/ false,
             /*allow_network_for_proxy*/ false,
+            /*sites_preview*/ false,
             /*is_wsl1*/ true,
         )
         .is_ok()
@@ -393,10 +401,36 @@ fn wsl1_allows_non_bubblewrap_linux_paths() {
             &restricted_policy,
             /*use_legacy_landlock*/ true,
             /*allow_network_for_proxy*/ false,
+            /*sites_preview*/ false,
             /*is_wsl1*/ true,
         )
         .is_ok()
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sites_preview_requires_isolated_or_managed_proxy_network() {
+    assert!(matches!(
+        super::ensure_sites_preview_has_isolated_network(
+            /*sites_preview*/ true,
+            NetworkSandboxPolicy::Enabled,
+            /*allow_network_for_proxy*/ false,
+        ),
+        Err(super::SandboxTransformError::SitesPreviewRequiresIsolatedNetwork)
+    ));
+    super::ensure_sites_preview_has_isolated_network(
+        /*sites_preview*/ true,
+        NetworkSandboxPolicy::Restricted,
+        /*allow_network_for_proxy*/ false,
+    )
+    .expect("restricted network uses an isolated namespace");
+    super::ensure_sites_preview_has_isolated_network(
+        /*sites_preview*/ true,
+        NetworkSandboxPolicy::Enabled,
+        /*allow_network_for_proxy*/ true,
+    )
+    .expect("managed proxy uses an isolated namespace");
 }
 
 #[cfg(target_os = "linux")]
@@ -511,6 +545,7 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
                     enforce_managed_network: false,
                     environment_id: None,
                     network: None,
+                    sites_preview: false,
                     sandbox_policy_cwd: &cwd_uri,
                     codex_linux_sandbox_exe: None,
                     use_legacy_landlock: false,

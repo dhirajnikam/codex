@@ -239,6 +239,7 @@ impl ExecCommandHandler {
 
         let ExecCommandArgs {
             tty,
+            sites_preview,
             yield_time_ms,
             max_output_tokens,
             sandbox_permissions,
@@ -352,6 +353,7 @@ impl ExecCommandHandler {
                     shell_mode,
                     network: context.turn.network.clone(),
                     tty,
+                    sites_preview,
                     sandbox_permissions: effective_additional_permissions.sandbox_permissions,
                     additional_permissions: normalized_additional_permissions,
                     additional_permissions_preapproved: effective_additional_permissions

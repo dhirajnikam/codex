@@ -239,7 +239,13 @@ fn exec_server_env_keeps_command_native() {
     };
 
     let request = attempt
-        .env_for_exec_server(command, options, /*network*/ None, Some("remote"))
+        .env_for_exec_server(
+            command,
+            options,
+            /*network*/ None,
+            /*sites_preview*/ false,
+            Some("remote"),
+        )
         .expect("prepare remote exec request");
 
     assert_eq!(
