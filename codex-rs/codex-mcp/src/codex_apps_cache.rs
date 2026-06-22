@@ -231,7 +231,7 @@ impl CodexAppsToolsCacheEntry {
 /// The principal says whose catalog we are reading. The source fingerprint
 /// says which Codex Apps endpoint/config we are reading from. `codex_home`
 /// keeps the persisted cache under the right home directory.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CodexAppsToolsCacheIdentity {
     codex_home: PathBuf,
     catalog_principal: CodexAppsCatalogPrincipal,
@@ -264,7 +264,12 @@ impl CodexAppsToolsCacheIdentity {
     }
 
     fn cache_path_in(&self, cache_dir: &str) -> PathBuf {
-        let identity_json = serde_json::to_string(self).unwrap_or_default();
+        // `codex_home` is already the parent directory. Keep it out of the
+        // filename hash so non-UTF-8 Unix paths cannot collapse distinct
+        // catalog identities onto the same disk cache file.
+        let identity_json =
+            serde_json::to_string(&(&self.catalog_principal, &self.catalog_source_fingerprint))
+                .expect("Codex Apps disk cache identity should serialize");
         let identity_hash = sha1_hex(&identity_json);
         self.codex_home
             .join(cache_dir)

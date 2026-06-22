@@ -45,6 +45,8 @@ use rmcp::model::NumberOrString;
 use rmcp::model::Tool;
 use std::collections::HashSet;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::io::DuplexStream;
@@ -1040,6 +1042,70 @@ fn codex_apps_tools_cache_scopes_catalog_sources() {
     assert_ne!(
         default_context.tools_cache_path(),
         sku_context.tools_cache_path()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_apps_tools_cache_scopes_non_utf8_home_disk_paths() {
+    let codex_home = PathBuf::from(std::ffi::OsString::from_vec(
+        b"/tmp/codex-home-\xff".to_vec(),
+    ));
+    let cache = CodexAppsToolsCache::default();
+    let config = crate::codex_apps_mcp_server_config(
+        "https://chatgpt.com",
+        /*apps_mcp_product_sku*/ None,
+    );
+    let user_one_context = cache.context(
+        codex_home.clone(),
+        CodexAppsToolsCacheKey {
+            account_id: Some("account-one".to_string()),
+            chatgpt_user_id: Some("user-one".to_string()),
+            is_workspace_account: false,
+        },
+        &config,
+        /*resolved_bearer_token*/ None,
+    );
+    let user_two_context = cache.context(
+        codex_home.clone(),
+        CodexAppsToolsCacheKey {
+            account_id: Some("account-two".to_string()),
+            chatgpt_user_id: Some("user-two".to_string()),
+            is_workspace_account: false,
+        },
+        &config,
+        /*resolved_bearer_token*/ None,
+    );
+    let token_context = cache.context(
+        codex_home.clone(),
+        CodexAppsToolsCacheKey {
+            account_id: Some("account-one".to_string()),
+            chatgpt_user_id: Some("user-one".to_string()),
+            is_workspace_account: false,
+        },
+        &config,
+        Some("token-one"),
+    );
+    let sku_context = cache.context(
+        codex_home,
+        CodexAppsToolsCacheKey {
+            account_id: Some("account-one".to_string()),
+            chatgpt_user_id: Some("user-one".to_string()),
+            is_workspace_account: false,
+        },
+        &crate::codex_apps_mcp_server_config("https://chatgpt.com", Some("sku")),
+        /*resolved_bearer_token*/ None,
+    );
+    let cache_paths = [
+        user_one_context.tools_cache_path(),
+        user_two_context.tools_cache_path(),
+        token_context.tools_cache_path(),
+        sku_context.tools_cache_path(),
+    ];
+
+    assert_eq!(
+        cache_paths.iter().collect::<HashSet<_>>().len(),
+        cache_paths.len()
     );
 }
 
