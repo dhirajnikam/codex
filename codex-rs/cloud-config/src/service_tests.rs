@@ -259,6 +259,37 @@ fn invalid_managed_requirements_bundle() -> CloudConfigBundle {
     }
 }
 
+fn conflicting_managed_requirements_bundle() -> CloudConfigBundle {
+    CloudConfigBundle {
+        config_toml: CloudConfigTomlBundle::default(),
+        requirements_toml: CloudRequirementsTomlBundle {
+            enterprise_managed: Vec::new(),
+            managed_layers: CloudRequirementsTomlManagedLayers {
+                baseline: Some(vec![CloudRequirementsFragment {
+                    id: "req_baseline".to_string(),
+                    name: "Baseline requirements".to_string(),
+                    contents: r#"
+[hooks]
+managed_dir = "/managed/baseline"
+windows_managed_dir = 'C:\managed\baseline'
+"#
+                    .to_string(),
+                }]),
+                system_overlay: Some(vec![CloudRequirementsFragment {
+                    id: "req_overlay".to_string(),
+                    name: "System overlay requirements".to_string(),
+                    contents: r#"
+[hooks]
+managed_dir = "/managed/overlay"
+windows_managed_dir = 'C:\managed\overlay'
+"#
+                    .to_string(),
+                }]),
+            },
+        },
+    }
+}
+
 fn request_error() -> BundleRequestError {
     BundleRequestError::Retryable(RetryableFailureKind::Request { status_code: None })
 }
@@ -518,6 +549,7 @@ async fn get_bundle_rejects_invalid_remote_buckets_before_cache_write() {
     for bundle in [
         invalid_config_bundle(),
         invalid_managed_requirements_bundle(),
+        conflicting_managed_requirements_bundle(),
     ] {
         let codex_home = tempdir().expect("tempdir");
         let fetcher = Arc::new(StaticBundleClient::new(bundle));

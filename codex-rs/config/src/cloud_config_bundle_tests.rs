@@ -40,6 +40,38 @@ fn bundle_with_explicitly_empty_overlay_is_not_empty() {
 }
 
 #[test]
+fn bundle_layers_skip_legacy_config_when_system_overlay_is_present() {
+    let tempdir = tempdir().expect("tempdir");
+    let base_dir = AbsolutePathBuf::from_absolute_path(tempdir.path()).expect("absolute path");
+    let layers = CloudConfigBundleLayers::from_bundle(
+        CloudConfigBundle {
+            config_toml: CloudConfigTomlBundle {
+                enterprise_managed: vec![CloudConfigFragment {
+                    id: "legacy".to_string(),
+                    name: "Invalid legacy config".to_string(),
+                    contents: "model = [".to_string(),
+                }],
+                managed_layers: CloudConfigTomlManagedLayers {
+                    baseline: None,
+                    system_overlay: Some(Vec::new()),
+                },
+            },
+            requirements_toml: CloudRequirementsTomlBundle::default(),
+        },
+        &base_dir,
+    )
+    .expect("legacy fallback should not be parsed when system overlay is present");
+
+    assert_eq!(
+        (
+            layers.system_overlay_config,
+            layers.enterprise_managed_config,
+        ),
+        (Some(Vec::new()), Vec::new())
+    );
+}
+
+#[test]
 fn bundle_layers_preserve_enterprise_managed_bucket_order() {
     let tempdir = tempdir().expect("tempdir");
     let base_dir = AbsolutePathBuf::from_absolute_path(tempdir.path()).expect("absolute path");

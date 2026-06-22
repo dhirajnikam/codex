@@ -117,7 +117,8 @@ pub struct CloudConfigBundleLayers {
     pub baseline_config: Option<Vec<ConfigLayerEntry>>,
     /// System-overlay config layers in `ConfigLayerStack` order, when delivered.
     pub system_overlay_config: Option<Vec<ConfigLayerEntry>>,
-    /// Enterprise-managed config layers in `ConfigLayerStack` order.
+    /// Enterprise-managed fallback config layers in `ConfigLayerStack` order.
+    /// Empty when a system-overlay config bucket is present.
     pub enterprise_managed_config: Vec<ConfigLayerEntry>,
     /// Baseline requirements layers in requirements merge order, when delivered.
     pub baseline_requirements: Option<Vec<RequirementsLayerEntry>>,
@@ -170,7 +171,7 @@ impl CloudConfigBundleLayers {
                 },
         } = bundle;
 
-        let parse_config_fragments = |fragments| {
+        let parse_enterprise_config_fragments = |fragments| {
             if strict_config {
                 enterprise_managed_config_layers_from_fragments_strict(fragments, base_dir)
             } else {
@@ -187,12 +188,19 @@ impl CloudConfigBundleLayers {
         let baseline_config = config_baseline
             .map(|fragments| parse_managed_config_fragments(fragments, CloudManagedLayer::Baseline))
             .transpose()?;
-        let system_overlay_config = config_system_overlay
-            .map(|fragments| {
-                parse_managed_config_fragments(fragments, CloudManagedLayer::SystemOverlay)
-            })
-            .transpose()?;
-        let enterprise_managed_config = parse_config_fragments(config_enterprise_managed)?;
+        let (system_overlay_config, enterprise_managed_config) = match config_system_overlay {
+            Some(fragments) => (
+                Some(parse_managed_config_fragments(
+                    fragments,
+                    CloudManagedLayer::SystemOverlay,
+                )?),
+                Vec::new(),
+            ),
+            None => (
+                None,
+                parse_enterprise_config_fragments(config_enterprise_managed)?,
+            ),
+        };
 
         let baseline_requirements = requirements_baseline.map(|fragments| {
             requirements_layers_from_fragments(fragments, base_dir, |id, name| {
