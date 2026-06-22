@@ -10,10 +10,10 @@ use crate::ConfigLayerEntry;
 use crate::RequirementSource;
 use crate::RequirementsLayerEntry;
 use crate::cloud_config_layers::CloudConfigLayerError;
-use crate::cloud_config_layers::cloud_config_layers_from_fragments_strict;
 use crate::cloud_config_layers::cloud_managed_config_layers_from_fragments;
 use crate::cloud_config_layers::cloud_managed_config_layers_from_fragments_strict;
-use crate::cloud_config_layers_from_fragments;
+use crate::cloud_config_layers::enterprise_managed_config_layers_from_fragments_strict;
+use crate::enterprise_managed_config_layers_from_fragments;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
@@ -172,9 +172,9 @@ impl CloudConfigBundleLayers {
 
         let parse_config_fragments = |fragments| {
             if strict_config {
-                cloud_config_layers_from_fragments_strict(fragments, base_dir)
+                enterprise_managed_config_layers_from_fragments_strict(fragments, base_dir)
             } else {
-                cloud_config_layers_from_fragments(fragments, base_dir)
+                enterprise_managed_config_layers_from_fragments(fragments, base_dir)
             }
         };
         let parse_managed_config_fragments = |fragments, layer| {

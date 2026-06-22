@@ -45,7 +45,7 @@ pub use cloud_config_bundle::CloudRequirementsTomlManagedLayers;
 pub use cloud_config_layers::CloudConfigFragment;
 pub use cloud_config_layers::CloudConfigFragmentSource;
 pub use cloud_config_layers::CloudConfigLayerError;
-pub use cloud_config_layers::cloud_config_layers_from_fragments;
+pub use cloud_config_layers::enterprise_managed_config_layers_from_fragments;
 pub use codex_app_server_protocol::CloudManagedLayer;
 pub use codex_app_server_protocol::ConfigLayerSource;
 pub use codex_protocol::config_types::ProfileV2Name;

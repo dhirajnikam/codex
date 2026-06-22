@@ -66,7 +66,7 @@ pub enum CloudConfigLayerError {
     },
 }
 
-pub fn cloud_config_layers_from_fragments(
+pub fn enterprise_managed_config_layers_from_fragments(
     fragments: impl IntoIterator<Item = CloudConfigFragment>,
     base_dir: &AbsolutePathBuf,
 ) -> Result<Vec<ConfigLayerEntry>, CloudConfigLayerError> {
@@ -78,7 +78,7 @@ pub fn cloud_config_layers_from_fragments(
     )
 }
 
-pub(crate) fn cloud_config_layers_from_fragments_strict(
+pub(crate) fn enterprise_managed_config_layers_from_fragments_strict(
     fragments: impl IntoIterator<Item = CloudConfigFragment>,
     base_dir: &AbsolutePathBuf,
 ) -> Result<Vec<ConfigLayerEntry>, CloudConfigLayerError> {

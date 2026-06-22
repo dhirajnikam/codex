@@ -31,7 +31,7 @@ fn base_dir() -> AbsolutePathBuf {
 #[test]
 fn layers_are_returned_in_stack_order() {
     let base_dir = base_dir();
-    let layers = cloud_config_layers_from_fragments(
+    let layers = enterprise_managed_config_layers_from_fragments(
         vec![
             fragment("high", "High priority", "model = \"cloud-high\""),
             fragment("low", "Low priority", "model_provider = \"cloud-low\""),
@@ -61,7 +61,7 @@ fn layers_are_returned_in_stack_order() {
 #[test]
 fn strict_layers_reject_unknown_config_fields() {
     let base_dir = base_dir();
-    let err = cloud_config_layers_from_fragments_strict(
+    let err = enterprise_managed_config_layers_from_fragments_strict(
         vec![fragment("strict", "Strict layer", "unknown_key = true")],
         &base_dir,
     )
@@ -95,7 +95,7 @@ review_model = "system-review"
         ),
     )];
     layers.extend(
-        cloud_config_layers_from_fragments(
+        enterprise_managed_config_layers_from_fragments(
             vec![
                 fragment("high", "High priority", "model_provider = \"cloud-high\""),
                 fragment("low", "Low priority", "review_model = \"cloud-low-review\""),
@@ -161,7 +161,7 @@ review_model = "cloud-low-review"
 #[test]
 fn relative_absolute_path_fields_resolve_against_base_dir() {
     let base_dir = base_dir();
-    let layers = cloud_config_layers_from_fragments(
+    let layers = enterprise_managed_config_layers_from_fragments(
         vec![fragment(
             "cfg_123",
             "Base policy",
@@ -184,7 +184,7 @@ fn relative_absolute_path_fields_resolve_against_base_dir() {
 #[test]
 fn home_relative_path_fields_are_allowed_and_resolved() {
     let base_dir = base_dir();
-    let layers = cloud_config_layers_from_fragments(
+    let layers = enterprise_managed_config_layers_from_fragments(
         vec![fragment(
             "cfg_123",
             "Base policy",
@@ -207,7 +207,7 @@ fn home_relative_path_fields_are_allowed_and_resolved() {
 #[tokio::test]
 async fn raw_toml_diagnostics_use_enterprise_layer_name() {
     let base_dir = base_dir();
-    let layers = cloud_config_layers_from_fragments(
+    let layers = enterprise_managed_config_layers_from_fragments(
         vec![fragment(
             "cfg_123",
             "Base policy",
