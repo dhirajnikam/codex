@@ -269,7 +269,7 @@ impl CodexAppsToolsCacheIdentity {
         // catalog identities onto the same disk cache file.
         let identity_json =
             serde_json::to_string(&(&self.catalog_principal, &self.catalog_source_fingerprint))
-                .expect("Codex Apps disk cache identity should serialize");
+                .unwrap_or_default();
         let identity_hash = sha1_hex(&identity_json);
         self.codex_home
             .join(cache_dir)
