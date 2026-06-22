@@ -102,10 +102,12 @@ fn marketplace_plugin_source_to_info(source: MarketplacePluginSource) -> PluginS
             package,
             version,
             registry,
+            integrity,
         } => PluginSource::Npm {
             package,
             version,
             registry,
+            integrity,
         },
     }
 }

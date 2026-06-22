@@ -1428,12 +1428,14 @@ pub fn materialize_marketplace_plugin_source(
             package,
             version,
             registry,
+            integrity,
         } => {
             let (path, tempdir) = materialize_npm_plugin_source(
                 codex_home,
                 package,
-                version.as_deref(),
+                version,
                 registry.as_deref(),
+                integrity,
             )?;
             Ok(MaterializedMarketplacePluginSource {
                 path,
