@@ -155,9 +155,10 @@ fn is_dangerous_to_call_with_exec(command: &[String]) -> bool {
     let name = executable_name_lookup_key(cmd0);
     let rest = &command[1..];
     match name.as_deref() {
-        // for `sudo <cmd>` / `doas <cmd>` simply re-check <cmd>; running a
-        // dangerous command as root is at least as dangerous.
-        Some("sudo" | "doas") => is_dangerous_to_call_with_exec(rest),
+        // `sudo`/`doas` are transparent wrappers; skip their options (incl.
+        // `-E`, `--`, and value-taking flags like `-u user`) before re-checking
+        // the wrapped command, so `sudo -E rm -rf /` cannot slip past as root.
+        Some("sudo" | "doas") => is_dangerous_to_call_with_exec(strip_sudo_prefix(rest)),
 
         // `env [VAR=val ...] <cmd>` is a transparent wrapper. Skip leading
         // assignments and `-`/`-i`/`-u VAR` style flags, then re-check the
@@ -183,9 +184,7 @@ fn is_dangerous_to_call_with_exec(command: &[String]) -> bool {
         // Recursive/forceful permission or ownership changes are a classic way
         // to brick a tree or escalate; require approval whenever recursion is
         // requested.
-        Some("chmod" | "chown" | "chgrp") => {
-            rest.iter().any(|arg| arg == "-R" || arg == "--recursive")
-        }
+        Some("chmod" | "chown" | "chgrp") => rest.iter().any(|arg| is_recursive_flag(arg)),
 
         // History-rewriting / forced remote mutation. `git push --force`(-f)
         // and `git push --delete` can destroy others' work irreversibly and
@@ -222,13 +221,29 @@ fn strip_env_prefix(args: &[String]) -> &[String] {
     let mut idx = 0;
     while idx < args.len() {
         let arg = args[idx].as_str();
-        if arg == "-i" || arg == "--ignore-environment" || arg == "-" {
+        // `--` ends option processing; the command follows.
+        if arg == "--" {
+            idx += 1;
+            break;
+        }
+        if arg == "-i"
+            || arg == "--ignore-environment"
+            || arg == "-"
+            || arg == "-0"
+            || arg == "--null"
+        {
             idx += 1;
             continue;
         }
-        // `-u NAME` / `--unset NAME` drop a variable; skip the pair.
-        if arg == "-u" || arg == "--unset" {
+        // Options that consume a following value: `-u NAME`/`--unset NAME`
+        // drop a variable, `-C DIR`/`--chdir DIR` change directory.
+        if arg == "-u" || arg == "--unset" || arg == "-C" || arg == "--chdir" {
             idx += 2;
+            continue;
+        }
+        // Long `--opt=value` forms such as `--unset=NAME` or `--chdir=DIR`.
+        if arg.starts_with("--") && arg.contains('=') {
+            idx += 1;
             continue;
         }
         // `VAR=value` assignment.
@@ -239,6 +254,80 @@ fn strip_env_prefix(args: &[String]) -> &[String] {
         break;
     }
     &args[idx.min(args.len())..]
+}
+
+/// Skip leading `sudo`/`doas` options and environment assignments so the
+/// wrapped command can be re-examined. Mirrors [`strip_env_prefix`]: value-
+/// taking options (`-u user`, `-g group`, `-C dir`, …) consume their argument,
+/// `--` ends option processing, and any other `-`-prefixed token or `VAR=value`
+/// assignment is skipped. Conservative — if the command cannot be located the
+/// remaining tokens are returned unchanged.
+fn strip_sudo_prefix(args: &[String]) -> &[String] {
+    let mut idx = 0;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            idx += 1;
+            break;
+        }
+        // Options that consume a following value.
+        if matches!(
+            arg,
+            "-u" | "--user"
+                | "-g"
+                | "--group"
+                | "-p"
+                | "--prompt"
+                | "-C"
+                | "--close-from"
+                | "-D"
+                | "--chdir"
+                | "-r"
+                | "--role"
+                | "-t"
+                | "--type"
+                | "-h"
+                | "--host"
+                | "-R"
+                | "--chroot"
+                | "-U"
+                | "--other-user"
+                | "-T"
+                | "--command-timeout"
+        ) {
+            idx += 2;
+            continue;
+        }
+        // `--opt=value` long options and any other standalone flag.
+        if arg.starts_with('-') && arg != "-" {
+            idx += 1;
+            continue;
+        }
+        // `VAR=value` environment assignment accepted before the command.
+        if arg.contains('=') {
+            idx += 1;
+            continue;
+        }
+        break;
+    }
+    &args[idx.min(args.len())..]
+}
+
+/// True for a recursive flag on `chmod`/`chown`/`chgrp`, including bundled
+/// short-flag groups such as `-hR` or `-Rf` as well as the `--recursive` long
+/// form. Only the capital `R` denotes recursion for these tools.
+fn is_recursive_flag(arg: &str) -> bool {
+    if arg == "--recursive" {
+        return true;
+    }
+    if let Some(flags) = arg.strip_prefix('-')
+        && arg != "--"
+        && !flags.is_empty()
+        && !flags.starts_with('-')
+    {
+        return flags.contains('R');
+    }
+    false
 }
 
 /// True for `git` subcommands that perform irreversible, outside-sandbox
@@ -258,7 +347,19 @@ fn is_dangerous_git_invocation(rest: &[String]) -> bool {
             arg.as_str(),
             "-f" | "--force" | "--force-with-lease" | "--delete" | "-d" | "--mirror"
         ) || arg.starts_with("--force-with-lease=")
+            || is_dangerous_push_refspec(arg)
     })
+}
+
+/// A push refspec is dangerous when it force-updates (leading `+`, e.g.
+/// `+main` or `+refs/heads/main:...`) or deletes the remote ref (empty source,
+/// i.e. a leading `:` such as `:old-branch`). Option tokens start with `-` and
+/// are never refspecs, so they are excluded.
+fn is_dangerous_push_refspec(arg: &str) -> bool {
+    if arg.starts_with('-') {
+        return false;
+    }
+    arg.starts_with('+') || arg.starts_with(':')
 }
 
 #[cfg(test)]
@@ -283,7 +384,9 @@ mod tests {
     fn rm_force_flag_after_operand_is_dangerous() {
         // The original argv[1]-only check missed flags placed after the path.
         assert!(command_might_be_dangerous(&vec_str(&[
-            "rm", "/important", "-rf"
+            "rm",
+            "/important",
+            "-rf"
         ])));
         assert!(command_might_be_dangerous(&vec_str(&[
             "rm", "--force", "x"
@@ -314,7 +417,11 @@ mod tests {
             "env", "FOO=bar", "rm", "-rf", "/"
         ])));
         assert!(command_might_be_dangerous(&vec_str(&[
-            "env", "-u", "PATH", "dd", "of=/dev/sda"
+            "env",
+            "-u",
+            "PATH",
+            "dd",
+            "of=/dev/sda"
         ])));
     }
 
@@ -325,8 +432,13 @@ mod tests {
             "if=/dev/zero",
             "of=/dev/sda"
         ])));
-        assert!(command_might_be_dangerous(&vec_str(&["mkfs.ext4", "/dev/sda1"])));
-        assert!(command_might_be_dangerous(&vec_str(&["wipefs", "-a", "/dev/sda"])));
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "mkfs.ext4",
+            "/dev/sda1"
+        ])));
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "wipefs", "-a", "/dev/sda"
+        ])));
         // dd that only reads is not flagged.
         assert!(!command_might_be_dangerous(&vec_str(&[
             "dd",
@@ -342,7 +454,10 @@ mod tests {
             "chmod", "-R", "000", "/"
         ])));
         assert!(command_might_be_dangerous(&vec_str(&[
-            "chown", "--recursive", "root", "/etc"
+            "chown",
+            "--recursive",
+            "root",
+            "/etc"
         ])));
         // Non-recursive chmod is left to the normal flow.
         assert!(!command_might_be_dangerous(&vec_str(&[
@@ -367,6 +482,80 @@ mod tests {
         ])));
         // Read-only git is never flagged.
         assert!(!command_might_be_dangerous(&vec_str(&["git", "status"])));
+    }
+
+    #[test]
+    fn sudo_options_are_skipped_before_rechecking() {
+        // Options before the wrapped command must not hide it.
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "sudo", "-E", "rm", "-rf", "/"
+        ])));
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "sudo", "--", "rm", "-rf", "/"
+        ])));
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "sudo", "-u", "root", "rm", "-rf", "/"
+        ])));
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "doas",
+            "-u",
+            "root",
+            "dd",
+            "of=/dev/sda"
+        ])));
+    }
+
+    #[test]
+    fn env_options_are_skipped_before_rechecking() {
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "env",
+            "--unset=PATH",
+            "rm",
+            "-rf",
+            "/"
+        ])));
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "env", "-C", "/tmp", "rm", "-rf", "/"
+        ])));
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "env", "--", "rm", "-rf", "/"
+        ])));
+    }
+
+    #[test]
+    fn dangerous_push_refspecs_are_detected() {
+        // Force update via leading `+`.
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "git", "push", "origin", "+main"
+        ])));
+        // Delete via empty source (`:dst`).
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "git",
+            "push",
+            "origin",
+            ":old-branch"
+        ])));
+        // An ordinary `src:dst` refspec is not flagged.
+        assert!(!command_might_be_dangerous(&vec_str(&[
+            "git",
+            "push",
+            "origin",
+            "main:main"
+        ])));
+    }
+
+    #[test]
+    fn bundled_recursive_perm_flags_are_dangerous() {
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "chmod", "-Rf", "000", "/"
+        ])));
+        assert!(command_might_be_dangerous(&vec_str(&[
+            "chown", "-hR", "root", "/u"
+        ])));
+        // A bundled group without `R` (e.g. `-f`) is not recursive.
+        assert!(!command_might_be_dangerous(&vec_str(&[
+            "chmod", "-f", "644", "file"
+        ])));
     }
 
     #[test]

@@ -65,9 +65,7 @@ impl AllowedToolsSpec {
     fn into_tool_names(self) -> Vec<String> {
         match self {
             AllowedToolsSpec::List(items) => items,
-            AllowedToolsSpec::Csv(value) => {
-                value.split(',').map(str::to_string).collect()
-            }
+            AllowedToolsSpec::Csv(value) => value.split(',').map(str::to_string).collect(),
         }
     }
 }
@@ -940,7 +938,9 @@ fn resolve_allowed_tools(raw: Vec<String>) -> Vec<String> {
             continue;
         }
         if tools.len() >= MAX_ALLOWED_TOOLS {
-            tracing::warn!("truncating allowed-tools: exceeds maximum of {MAX_ALLOWED_TOOLS} entries");
+            tracing::warn!(
+                "truncating allowed-tools: exceeds maximum of {MAX_ALLOWED_TOOLS} entries"
+            );
             break;
         }
         tools.push(tool);

@@ -168,6 +168,21 @@ async fn read_agents_md(
                         continue;
                     }
                 };
+                // Security boundary: an import must resolve to a file at or
+                // below the importing document's own directory. `PathUri::join`
+                // lets an absolute target replace the base and `..` walk upward,
+                // so without this check a crafted `@/etc/shadow` or
+                // `@../../.ssh/id_rsa` could inject files from outside the
+                // project into model-visible instructions. AGENTS.md discovery
+                // already stops at the project root; imports must not reach past
+                // their own subtree. Reject anything that escapes it.
+                if !import_path.starts_with(&base_dir) {
+                    tracing::warn!(
+                        target = %target,
+                        "ignoring @import that escapes the importing document's directory"
+                    );
+                    continue;
+                }
                 match fs.get_metadata(&import_path, /*sandbox*/ None).await {
                     Ok(metadata) if metadata.is_file => {}
                     Ok(_) => continue,
