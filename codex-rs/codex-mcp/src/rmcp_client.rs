@@ -68,6 +68,8 @@ use rmcp::model::ProtocolVersion;
 use rmcp::model::Tool as RmcpTool;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use url::Host;
+use url::Url;
 
 /// MCP server capability indicating that Codex should include [`SandboxState`]
 /// in tool-call request `_meta` under this key.
@@ -87,6 +89,9 @@ const UNTRUSTED_CONNECTOR_META_KEYS: &[&str] = &[
     "connector_description",
     "connectorDescription",
 ];
+const CODEX_CLOUD_AGENT_APPS_MCP_SERVER_NAME: &str = "codex-connectors-mcp";
+const CODEX_BACKEND_APPS_PATH: &str = "/api/codex/apps";
+const CHATGPT_CODEX_BACKEND_APPS_PATH: &str = "/backend-api/codex/apps";
 
 #[derive(Clone)]
 pub(crate) struct ManagedClient {
@@ -131,6 +136,7 @@ impl ManagedClient {
 pub(crate) struct AsyncManagedClient {
     pub(crate) client: Shared<BoxFuture<'static, Result<ManagedClient, StartupOutcomeError>>>,
     pub(crate) is_codex_apps_mcp_server: bool,
+    pub(crate) supports_openai_file_params: bool,
     pub(crate) cached_tool_info_snapshot: Option<Vec<ToolInfo>>,
     pub(crate) cached_server_info: Option<McpServerInfo>,
     pub(crate) startup_complete: Arc<AtomicBool>,
@@ -158,6 +164,7 @@ impl AsyncManagedClient {
         supports_openai_form_elicitation: bool,
     ) -> Self {
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
+        let supports_openai_file_params = supports_openai_file_params(&server_name, &server);
         let tool_filter = server
             .configured_config()
             .map(ToolFilter::from_config)
@@ -239,6 +246,7 @@ impl AsyncManagedClient {
         Self {
             client,
             is_codex_apps_mcp_server,
+            supports_openai_file_params,
             cached_tool_info_snapshot,
             cached_server_info,
             startup_complete,
@@ -276,7 +284,11 @@ impl AsyncManagedClient {
         Some(if self.is_codex_apps_mcp_server {
             prepare_codex_apps_tools_for_model(tools, &self.tool_plugin_provenance)
         } else {
-            prepare_regular_mcp_tools_for_model(tools, &self.tool_plugin_provenance)
+            prepare_regular_mcp_tools_for_model(
+                tools,
+                &self.tool_plugin_provenance,
+                self.supports_openai_file_params,
+            )
         })
     }
 
@@ -285,6 +297,70 @@ impl AsyncManagedClient {
             return self.cached_tool_info_snapshot.clone();
         }
         None
+    }
+}
+
+/// Returns whether a server can use the first-party Apps file upload bridge.
+///
+/// codex-connectors-mcp is the name used by Codex Cloud Agent's injected
+/// Codex backend Apps server. Unlike the reserved codex_apps server, that
+/// alias can also appear in user config, so trust its fileParams metadata only
+/// when it points at a known Codex backend Apps endpoint.
+fn supports_openai_file_params(server_name: &str, server: &EffectiveMcpServer) -> bool {
+    server_name == CODEX_APPS_MCP_SERVER_NAME
+        || (server_name == CODEX_CLOUD_AGENT_APPS_MCP_SERVER_NAME
+            && server
+                .configured_config()
+                .is_some_and(is_trusted_cloud_agent_apps_mcp_config))
+}
+
+fn is_trusted_cloud_agent_apps_mcp_config(config: &McpServerConfig) -> bool {
+    let McpServerTransportConfig::StreamableHttp { url, .. } = &config.transport else {
+        return false;
+    };
+    let Ok(url) = Url::parse(url) else {
+        return false;
+    };
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+
+    let path = url.path().trim_end_matches('/');
+    if path != CODEX_BACKEND_APPS_PATH && path != CHATGPT_CODEX_BACKEND_APPS_PATH {
+        return false;
+    }
+
+    let host = url.host();
+    let is_chatgpt_route = url.scheme() == "https"
+        && matches!(
+            host,
+            Some(Host::Domain("chatgpt.com" | "chatgpt-staging.com"))
+        )
+        && url.port().is_none_or(|port| port == 18080);
+    let is_internal_codex_backend_route = url.scheme() == "https"
+        && matches!(
+            host,
+            Some(Host::Domain(host))
+                if host.starts_with("codex-backend.gateway.")
+                    && host.ends_with(".internal.api.openai.org")
+        )
+        && url.port().is_none();
+    let is_local_debug_route =
+        cfg!(debug_assertions) && matches!(url.scheme(), "http" | "https") && is_localhost(host);
+
+    is_chatgpt_route || is_internal_codex_backend_route || is_local_debug_route
+}
+
+fn is_localhost(host: Option<Host<&str>>) -> bool {
+    match host {
+        Some(Host::Domain(host)) => host == "localhost",
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
     }
 }
 
@@ -391,8 +467,12 @@ fn add_plugin_provenance_to_tool(tool: &mut ToolInfo, plugin_names: &[String]) {
 fn prepare_regular_mcp_tools_for_model(
     mut tools: Vec<ToolInfo>,
     tool_plugin_provenance: &ToolPluginProvenance,
+    supports_openai_file_params: bool,
 ) -> Vec<ToolInfo> {
     for tool in &mut tools {
+        if supports_openai_file_params {
+            tool.tool = tool_with_model_visible_input_schema(&tool.tool);
+        }
         let plugin_names = tool_plugin_provenance
             .plugin_display_names_for_mcp_server_name(tool.server_name.as_str());
         add_plugin_provenance_to_tool(tool, plugin_names);
@@ -752,6 +832,17 @@ mod tests {
     use rmcp::model::JsonObject;
     use rmcp::model::Meta;
 
+    fn streamable_http_server(url: &str) -> EffectiveMcpServer {
+        let mut config = crate::codex_apps_mcp_server_config("https://chatgpt.com", None);
+        config.transport = McpServerTransportConfig::StreamableHttp {
+            url: url.to_string(),
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+        };
+        EffectiveMcpServer::configured(config)
+    }
+
     #[test]
     fn mcp_initialize_advertises_openai_form_only_when_supported() {
         let unsupported = mcp_initialize_request_params(
@@ -819,6 +910,103 @@ mod tests {
         assert_eq!(
             meta.0.get("custom").and_then(|value| value.as_str()),
             Some("kept")
+        );
+    }
+
+    #[test]
+    fn cloud_agent_apps_alias_requires_trusted_codex_backend_endpoint() {
+        for url in [
+            "https://chatgpt.com:18080/backend-api/codex/apps",
+            "https://chatgpt.com/backend-api/codex/apps",
+            "https://chatgpt-staging.com/backend-api/codex/apps",
+            "https://codex-backend.gateway.unified-0s.internal.api.openai.org/api/codex/apps",
+        ] {
+            assert!(
+                supports_openai_file_params(
+                    CODEX_CLOUD_AGENT_APPS_MCP_SERVER_NAME,
+                    &streamable_http_server(url),
+                ),
+                "{url} should be trusted"
+            );
+        }
+
+        for url in [
+            "http://chatgpt.com/backend-api/codex/apps",
+            "https://chatgpt.com:4443/backend-api/codex/apps",
+            "https://codex-backend.gateway.unified-0s.internal.api.openai.org:4443/api/codex/apps",
+            "https://chatgpt.com/backend-api/wham/apps",
+            "https://chatgpt.com/backend-api/codex/apps?token=secret",
+            "https://user:pass@chatgpt.com/backend-api/codex/apps",
+            "https://example.com/api/codex/apps",
+        ] {
+            assert!(
+                !supports_openai_file_params(
+                    CODEX_CLOUD_AGENT_APPS_MCP_SERVER_NAME,
+                    &streamable_http_server(url),
+                ),
+                "{url} should not be trusted"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_mcp_name_cannot_opt_into_codex_apps_file_handling() {
+        assert!(!supports_openai_file_params(
+            "custom",
+            &streamable_http_server("https://chatgpt.com/backend-api/codex/apps"),
+        ));
+    }
+
+    #[test]
+    fn trusted_alias_masks_file_schema_without_codex_apps_tool_normalization() {
+        let mut tool = tool_with_connector_meta();
+        tool.input_schema = Arc::new(
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file": {"type": "object"}
+                }
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+        );
+        let tool_info = regular_mcp_tool_info_from_listed_tool(
+            CODEX_CLOUD_AGENT_APPS_MCP_SERVER_NAME,
+            /*server_instructions*/ None,
+            ToolWithConnectorId {
+                tool,
+                connector_id: Some("connector_library".to_string()),
+                connector_name: Some("Library".to_string()),
+                connector_description: Some("Library connector".to_string()),
+            },
+        );
+
+        let tools = prepare_regular_mcp_tools_for_model(
+            vec![tool_info],
+            &ToolPluginProvenance::default(),
+            /*supports_openai_file_params*/ true,
+        );
+        let tool = tools.first().expect("tool");
+
+        assert_eq!(
+            tool.callable_namespace,
+            CODEX_CLOUD_AGENT_APPS_MCP_SERVER_NAME
+        );
+        assert_eq!(
+            *tool.tool.input_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "This parameter expects an absolute local file path. If you want to upload a file, provide the absolute path to that file here."
+                    }
+                }
+            })
+            .as_object()
+            .expect("object")
+            .clone()
         );
     }
 

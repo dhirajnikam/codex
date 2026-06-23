@@ -1478,6 +1478,7 @@ pub(crate) async fn lookup_mcp_tool_metadata(
     tool_name: &str,
 ) -> Option<McpToolApprovalMetadata> {
     let manager = sess.services.mcp_connection_manager.load_full();
+    let supports_openai_file_params = manager.supports_openai_file_params(server);
     let plugin_id = manager
         .plugin_id_for_mcp_server_name(server)
         .map(str::to_string);
@@ -1532,19 +1533,20 @@ pub(crate) async fn lookup_mcp_tool_metadata(
             .and_then(|meta| meta.get(MCP_TOOL_CODEX_APPS_META_KEY))
             .and_then(serde_json::Value::as_object)
             .cloned(),
-        // Disallow custom MCPs from uploading files via fileParams.
+        // Disallow custom MCPs from uploading files via fileParams. The
+        // manager only enables this for a trusted Apps file bridge server.
         openai_file_input_params: openai_file_input_params_for_server(
-            server,
+            supports_openai_file_params,
             tool_info.tool.meta.as_deref(),
         ),
     })
 }
 
 fn openai_file_input_params_for_server(
-    server: &str,
+    supports_openai_file_params: bool,
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<Vec<String>> {
-    (server == CODEX_APPS_MCP_SERVER_NAME)
+    supports_openai_file_params
         .then_some(declared_openai_file_input_param_names(meta))
         .filter(|params| !params.is_empty())
 }

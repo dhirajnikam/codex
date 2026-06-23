@@ -394,6 +394,16 @@ impl McpConnectionManager {
         server_name == CODEX_APPS_MCP_SERVER_NAME && self.server_metadata.contains_key(server_name)
     }
 
+    /// Returns whether a server was allowed to use the first-party Apps file
+    /// upload bridge while it was initialized. This is narrower than honoring
+    /// fileParams metadata from arbitrary MCPs and includes the Cloud
+    /// Agent-hosted Apps alias after its endpoint has been validated.
+    pub fn supports_openai_file_params(&self, server_name: &str) -> bool {
+        self.clients
+            .get(server_name)
+            .is_some_and(|client| client.supports_openai_file_params)
+    }
+
     pub fn set_approval_policy(&self, approval_policy: &Constrained<AskForApproval>) {
         if let Ok(mut policy) = self.elicitation_requests.approval_policy.lock() {
             *policy = approval_policy.value();

@@ -801,6 +801,7 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_while_client_is_pending()
         AsyncManagedClient {
             client: pending_client,
             is_codex_apps_mcp_server: true,
+            supports_openai_file_params: true,
             cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -839,6 +840,7 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
         AsyncManagedClient {
             client: pending_client,
             is_codex_apps_mcp_server: true,
+            supports_openai_file_params: true,
             cached_tool_info_snapshot: Some(Vec::new()),
             cached_server_info: Some(server_info.clone()),
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -877,6 +879,7 @@ async fn list_all_tools_accepts_canonical_namespaced_tool_names() {
         AsyncManagedClient {
             client: pending_client,
             is_codex_apps_mcp_server: false,
+            supports_openai_file_params: false,
             cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -921,6 +924,7 @@ async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
         AsyncManagedClient {
             client: pending_client,
             is_codex_apps_mcp_server: false,
+            supports_openai_file_params: false,
             cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -964,6 +968,7 @@ async fn list_all_tools_blocks_while_client_is_pending_without_cached_tool_info_
         AsyncManagedClient {
             client: pending_client,
             is_codex_apps_mcp_server: true,
+            supports_openai_file_params: true,
             cached_tool_info_snapshot: None,
             cached_server_info: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1001,6 +1006,7 @@ async fn shutdown_cancels_pending_tool_listing() {
         AsyncManagedClient {
             client: pending_client,
             is_codex_apps_mcp_server: true,
+            supports_openai_file_params: true,
             cached_tool_info_snapshot: None,
             cached_server_info: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1037,6 +1043,7 @@ async fn list_all_tools_does_not_block_when_cached_tool_info_snapshot_is_empty()
         AsyncManagedClient {
             client: pending_client,
             is_codex_apps_mcp_server: true,
+            supports_openai_file_params: true,
             cached_tool_info_snapshot: Some(Vec::new()),
             cached_server_info: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1078,6 +1085,7 @@ async fn list_all_tools_uses_cached_tool_info_snapshot_when_client_startup_fails
         AsyncManagedClient {
             client: failed_client,
             is_codex_apps_mcp_server: true,
+            supports_openai_file_params: true,
             cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: Some(server_info.clone()),
             startup_complete,
@@ -1137,6 +1145,7 @@ async fn list_all_tools_adds_server_metadata_to_cached_tools() {
         AsyncManagedClient {
             client: pending_client,
             is_codex_apps_mcp_server: false,
+            supports_openai_file_params: false,
             cached_tool_info_snapshot: Some(startup_tools),
             cached_server_info: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
