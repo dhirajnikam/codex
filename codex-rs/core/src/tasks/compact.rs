@@ -4,10 +4,10 @@ use super::SessionTask;
 use super::SessionTaskContext;
 use super::SessionTaskResult;
 use super::emit_compact_metric;
-use crate::session::TokenBudgetCompactionLifecycle;
 use crate::session::TurnInput;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
+use codex_features::Feature;
 use codex_protocol::error::CodexErr;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
@@ -32,15 +32,8 @@ impl SessionTask for CompactTask {
         _cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let session = session.clone_session();
-        // Token-budget manual compaction starts a normal turn lifecycle, then
-        // resets to a fresh context window instead of summarizing history.
-        if session
-            .maybe_start_token_budget_compaction_window(
-                ctx.as_ref(),
-                TokenBudgetCompactionLifecycle::ManualCompact,
-            )
-            .await
-        {
+        if ctx.config.features.enabled(Feature::TokenBudget) {
+            crate::compact_token_budget::run_manual_compact_task(session, ctx).await?;
             return Ok(None);
         }
 

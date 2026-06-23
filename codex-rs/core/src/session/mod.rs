@@ -259,14 +259,6 @@ pub(crate) enum NewContextWindowMode {
     StartIfRequested,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum TokenBudgetCompactionLifecycle {
-    /// Manual `/compact` starts its own turn lifecycle before resetting context.
-    ManualCompact,
-    /// Inline auto-compaction runs inside an existing turn lifecycle.
-    InlineAutoCompact,
-}
-
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
@@ -402,7 +394,6 @@ use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnModerationMetadataEvent;
-use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_tools::ToolEnvironmentMode;
@@ -3413,43 +3404,6 @@ impl Session {
     pub(crate) async fn request_new_context_window(&self) {
         let mut state = self.state.lock().await;
         state.request_new_context_window();
-    }
-
-    /// Start a token-budget compaction window if token-budget mode is enabled.
-    ///
-    /// Token-budget compaction intentionally behaves like the `new_context` tool:
-    /// it installs the standard injected context for a new window instead of
-    /// summarizing or carrying prior user/assistant transcript messages forward.
-    /// Unlike the `new_context` tool path, compaction is the request to reset
-    /// context, so it forces a new window rather than consuming a pending
-    /// new-context request.
-    /// Returns `true` when the caller should skip normal local or remote compaction.
-    pub(crate) async fn maybe_start_token_budget_compaction_window(
-        &self,
-        turn_context: &TurnContext,
-        lifecycle: TokenBudgetCompactionLifecycle,
-    ) -> bool {
-        if !turn_context.config.features.enabled(Feature::TokenBudget) {
-            return false;
-        }
-
-        if matches!(lifecycle, TokenBudgetCompactionLifecycle::ManualCompact) {
-            self.send_event(
-                turn_context,
-                EventMsg::TurnStarted(TurnStartedEvent {
-                    turn_id: turn_context.sub_id.clone(),
-                    trace_id: turn_context.trace_id.clone(),
-                    started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
-                    model_context_window: turn_context.model_context_window(),
-                    collaboration_mode_kind: turn_context.collaboration_mode.mode,
-                }),
-            )
-            .await;
-        }
-
-        self.start_new_context_window(turn_context, NewContextWindowMode::ForceStart)
-            .await;
-        true
     }
 
     pub(crate) async fn start_new_context_window(
