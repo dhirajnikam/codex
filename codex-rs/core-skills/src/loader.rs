@@ -44,6 +44,32 @@ struct SkillFrontmatter {
     description: Option<String>,
     #[serde(default)]
     metadata: SkillFrontmatterMetadata,
+    /// The `allowed-tools` frontmatter field: the tool surface the skill is
+    /// permitted to drive. Accepts either a YAML sequence or a single
+    /// comma-separated string so both spellings load unchanged.
+    #[serde(default, rename = "allowed-tools")]
+    allowed_tools: Option<AllowedToolsSpec>,
+}
+
+/// Frontmatter shape for `allowed-tools`: a list, a comma-separated string, or
+/// absent. Kept private; the loader normalizes it to `Vec<String>` so the rest
+/// of the system only sees the canonical form.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AllowedToolsSpec {
+    List(Vec<String>),
+    Csv(String),
+}
+
+impl AllowedToolsSpec {
+    fn into_tool_names(self) -> Vec<String> {
+        match self {
+            AllowedToolsSpec::List(items) => items,
+            AllowedToolsSpec::Csv(value) => {
+                value.split(',').map(str::to_string).collect()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -120,6 +146,8 @@ const MAX_DEPENDENCY_VALUE_LEN: usize = MAX_DESCRIPTION_LEN;
 const MAX_DEPENDENCY_DESCRIPTION_LEN: usize = MAX_DESCRIPTION_LEN;
 const MAX_DEPENDENCY_COMMAND_LEN: usize = MAX_DESCRIPTION_LEN;
 const MAX_DEPENDENCY_URL_LEN: usize = MAX_DESCRIPTION_LEN;
+const MAX_ALLOWED_TOOL_NAME_LEN: usize = MAX_NAME_LEN;
+const MAX_ALLOWED_TOOLS: usize = 256;
 // Traversal depth from the skills root.
 const MAX_SCAN_DEPTH: usize = 6;
 const MAX_SKILLS_DIRS_PER_ROOT: usize = 2000;
@@ -697,6 +725,14 @@ async fn parse_skill_file(
         policy,
     } = load_skill_metadata(fs, path, plugin_root).await;
 
+    // `allowed-tools` is declared in SKILL.md frontmatter but belongs to the
+    // skill's policy contract, so merge it into the policy
+    // resolved from the optional metadata file.
+    let allowed_tools = parsed
+        .allowed_tools
+        .map(|spec| resolve_allowed_tools(spec.into_tool_names()));
+    let policy = merge_allowed_tools_into_policy(policy, allowed_tools);
+
     validate_len(&base_name, MAX_NAME_LEN, "name")?;
     validate_len(&name, MAX_QUALIFIED_NAME_LEN, "qualified name")?;
     if description.is_empty() {
@@ -879,7 +915,62 @@ fn resolve_policy(policy: Option<Policy>) -> Option<SkillPolicy> {
     policy.map(|policy| SkillPolicy {
         allow_implicit_invocation: policy.allow_implicit_invocation,
         products: policy.products,
+        allowed_tools: None,
     })
+}
+
+/// Normalize a raw `allowed-tools` list: trim entries, drop empties and
+/// over-long names, dedupe while preserving declaration order, and cap the
+/// total count. Returns the canonical allowlist (possibly empty, meaning "no
+/// tools permitted").
+fn resolve_allowed_tools(raw: Vec<String>) -> Vec<String> {
+    let mut tools: Vec<String> = Vec::new();
+    for tool in raw {
+        let tool = tool.trim().to_string();
+        if tool.is_empty() {
+            continue;
+        }
+        if tool.chars().count() > MAX_ALLOWED_TOOL_NAME_LEN {
+            tracing::warn!(
+                "ignoring allowed-tools entry: exceeds maximum length of {MAX_ALLOWED_TOOL_NAME_LEN} characters"
+            );
+            continue;
+        }
+        if tools.iter().any(|existing| existing == &tool) {
+            continue;
+        }
+        if tools.len() >= MAX_ALLOWED_TOOLS {
+            tracing::warn!("truncating allowed-tools: exceeds maximum of {MAX_ALLOWED_TOOLS} entries");
+            break;
+        }
+        tools.push(tool);
+    }
+    tools
+}
+
+/// Fold a frontmatter-declared `allowed-tools` allowlist into the skill policy.
+///
+/// `allowed_tools == None` leaves the policy untouched (no restriction
+/// declared). A declared allowlist attaches to an existing policy, or
+/// synthesizes a default policy when the metadata file omitted one, so the
+/// contract is reachable through a single field regardless of which file
+/// declared it.
+fn merge_allowed_tools_into_policy(
+    policy: Option<SkillPolicy>,
+    allowed_tools: Option<Vec<String>>,
+) -> Option<SkillPolicy> {
+    match (policy, allowed_tools) {
+        (policy, None) => policy,
+        (Some(mut policy), Some(allowed_tools)) => {
+            policy.allowed_tools = Some(allowed_tools);
+            Some(policy)
+        }
+        (None, Some(allowed_tools)) => Some(SkillPolicy {
+            allow_implicit_invocation: None,
+            products: Vec::new(),
+            allowed_tools: Some(allowed_tools),
+        }),
+    }
 }
 
 fn resolve_dependency_tool(tool: DependencyTool) -> Option<SkillToolDependency> {

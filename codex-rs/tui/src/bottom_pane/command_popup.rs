@@ -1,3 +1,4 @@
+use codex_utils_fuzzy_match::fuzzy_match;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::WidgetRef;
@@ -140,57 +141,38 @@ impl CommandPopup {
         )
     }
 
-    /// Compute exact/prefix matches over built-in commands and user prompts,
-    /// paired with optional highlight indices. Preserves the original
-    /// presentation order for built-ins and prompts.
+    /// Compute fuzzy (subsequence) matches over built-in commands, paired with
+    /// the matched character indices for highlighting. Matches are ranked by
+    /// fuzzy score (prefix matches sort first); ties keep presentation order.
     fn filtered(&self) -> Vec<(CommandItem, Option<Vec<usize>>)> {
         let filter = self.command_filter.trim();
-        let mut out: Vec<(CommandItem, Option<Vec<usize>>)> = Vec::new();
         if filter.is_empty() {
-            for command in self.commands.iter() {
-                if matches!(command, CommandItem::Builtin(cmd) if ALIAS_COMMANDS.contains(cmd)) {
-                    continue;
-                }
-                out.push((command.clone(), None));
-            }
-            return out;
+            return self
+                .commands
+                .iter()
+                .filter(|command| {
+                    !matches!(command, CommandItem::Builtin(cmd) if ALIAS_COMMANDS.contains(cmd))
+                })
+                .map(|command| (command.clone(), None))
+                .collect();
         }
 
-        let filter_lower = filter.to_lowercase();
-        let filter_chars = filter.chars().count();
-        let mut exact: Vec<(CommandItem, Option<Vec<usize>>)> = Vec::new();
-        let mut prefix: Vec<(CommandItem, Option<Vec<usize>>)> = Vec::new();
-        let indices_for = |offset| Some((offset..offset + filter_chars).collect());
-
-        let mut push_match =
-            |item: CommandItem, display: &str, name: Option<&str>, name_offset: usize| {
-                let display_lower = display.to_lowercase();
-                let name_lower = name.map(str::to_lowercase);
-                let display_exact = display_lower == filter_lower;
-                let name_exact = name_lower.as_deref() == Some(filter_lower.as_str());
-                if display_exact || name_exact {
-                    let offset = if display_exact { 0 } else { name_offset };
-                    exact.push((item, indices_for(offset)));
-                    return;
-                }
-                let display_prefix = display_lower.starts_with(&filter_lower);
-                let name_prefix = name_lower
-                    .as_ref()
-                    .is_some_and(|name| name.starts_with(&filter_lower));
-                if display_prefix || name_prefix {
-                    let offset = if display_prefix { 0 } else { name_offset };
-                    prefix.push((item, indices_for(offset)));
-                }
-            };
-
-        for command in self.commands.iter() {
-            let display = command.command();
-            push_match(command.clone(), display, None, 0);
-        }
-
-        out.extend(exact);
-        out.extend(prefix);
-        out
+        // Rank by fuzzy score (lower is better); preserve presentation order on
+        // ties by carrying the original index as a stable secondary key.
+        let mut scored: Vec<(i32, usize, CommandItem, Option<Vec<usize>>)> = self
+            .commands
+            .iter()
+            .enumerate()
+            .filter_map(|(order, command)| {
+                let (indices, score) = fuzzy_match(command.command(), filter)?;
+                Some((score, order, command.clone(), Some(indices)))
+            })
+            .collect();
+        scored.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        scored
+            .into_iter()
+            .map(|(_, _, item, indices)| (item, indices))
+            .collect()
     }
 
     fn filtered_items(&self) -> Vec<CommandItem> {
@@ -372,6 +354,9 @@ mod tests {
         let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
         popup.on_composer_text_change("/m".to_string());
 
+        // Commands whose name *starts* with the filter rank ahead of mere
+        // subsequence hits, and among the prefix group presentation order is
+        // preserved.
         let cmds: Vec<String> = popup
             .filtered_items()
             .into_iter()
@@ -380,13 +365,14 @@ mod tests {
                 CommandItem::ServiceTier(command) => command.name,
             })
             .collect();
+        let prefix_group: Vec<&String> = cmds.iter().take(4).collect();
         assert_eq!(
-            cmds,
+            prefix_group,
             vec![
-                "model".to_string(),
-                "memories".to_string(),
-                "mention".to_string(),
-                "mcp".to_string()
+                &"model".to_string(),
+                &"memories".to_string(),
+                &"mention".to_string(),
+                &"mcp".to_string(),
             ]
         );
     }
@@ -430,22 +416,43 @@ mod tests {
         insta::assert_snapshot!("command_popup_default_items", commands);
     }
 
-    #[test]
-    fn prefix_filter_limits_matches_for_ac() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
-        popup.on_composer_text_change("/ac".to_string());
-
-        let cmds: Vec<String> = popup
+    fn filtered_command_names(popup: &CommandPopup) -> Vec<String> {
+        popup
             .filtered_items()
             .into_iter()
             .map(|item| match item {
                 CommandItem::Builtin(cmd) => cmd.command().to_string(),
                 CommandItem::ServiceTier(command) => command.name,
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn fuzzy_filter_matches_subsequence() {
+        // Prefix matching would never surface "statusline" for "/stln", but a
+        // subsequence match does. This is the parity behavior we want.
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
+        popup.on_composer_text_change("/stln".to_string());
+
+        let cmds = filtered_command_names(&popup);
         assert!(
-            !cmds.iter().any(|cmd| cmd == "compact"),
-            "expected prefix search for '/ac' to exclude 'compact', got {cmds:?}"
+            cmds.iter().any(|cmd| cmd == "statusline"),
+            "expected fuzzy search for '/stln' to surface 'statusline', got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn fuzzy_filter_ranks_prefix_match_first() {
+        // "compact" is reachable as a subsequence from "/cmp", but the prefix
+        // match should still rank ahead of any non-prefix subsequence hit.
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
+        popup.on_composer_text_change("/comp".to_string());
+
+        let cmds = filtered_command_names(&popup);
+        assert_eq!(
+            cmds.first().map(String::as_str),
+            Some("compact"),
+            "expected '/comp' to rank the prefix match 'compact' first, got {cmds:?}"
         );
     }
 

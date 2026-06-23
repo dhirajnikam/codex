@@ -270,6 +270,7 @@ fn response_item_type(item: &ResponseItem) -> &'static str {
         ResponseItem::Compaction { .. } => "response.compaction",
         ResponseItem::CompactionTrigger { .. } => "response.compaction_trigger",
         ResponseItem::ContextCompaction { .. } => "response.context_compaction",
+        ResponseItem::AdditionalTools { .. } => "response.additional_tools",
         ResponseItem::Other => "response.other",
     }
 }
