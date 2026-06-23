@@ -112,6 +112,7 @@ pub use protocol::FsRemoveResponse;
 pub use protocol::FsWriteFileParams;
 pub use protocol::FsWriteFileResponse;
 pub use protocol::HttpHeader;
+pub use protocol::HttpRedirectPolicy;
 pub use protocol::HttpRequestBodyDeltaNotification;
 pub use protocol::HttpRequestParams;
 pub use protocol::HttpRequestResponse;

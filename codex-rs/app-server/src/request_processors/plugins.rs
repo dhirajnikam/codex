@@ -1866,6 +1866,7 @@ impl PluginRequestProcessor {
                 let notification = ServerNotification::McpServerOauthLoginCompleted(
                     McpServerOauthLoginCompletedNotification {
                         name: notification_name,
+                        thread_id: None,
                         success,
                         error,
                     },
