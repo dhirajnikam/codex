@@ -3430,7 +3430,7 @@ impl Session {
             return false;
         }
 
-        if let TokenBudgetCompactionLifecycle::ManualCompact = lifecycle {
+        if matches!(lifecycle, TokenBudgetCompactionLifecycle::ManualCompact) {
             self.send_event(
                 turn_context,
                 EventMsg::TurnStarted(TurnStartedEvent {
