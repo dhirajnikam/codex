@@ -256,7 +256,7 @@ pub(crate) enum NewContextWindowMode {
     /// Start a fresh context window regardless of whether a new-context request is pending.
     ForceStart,
     /// Start a fresh context window only if one was explicitly requested.
-    MaybeStart,
+    StartIfRequested,
 }
 
 #[derive(Debug, PartialEq)]

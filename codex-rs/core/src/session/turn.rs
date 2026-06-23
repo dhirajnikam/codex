@@ -344,7 +344,7 @@ pub(crate) async fn run_turn(
                 let started_new_context_window = sess
                     .start_new_context_window(
                         turn_context.as_ref(),
-                        NewContextWindowMode::MaybeStart,
+                        NewContextWindowMode::StartIfRequested,
                     )
                     .await
                     .is_some();

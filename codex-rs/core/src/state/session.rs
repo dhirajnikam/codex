@@ -177,7 +177,7 @@ impl SessionState {
         &mut self,
         mode: NewContextWindowMode,
     ) -> Option<(u64, AutoCompactWindowIds)> {
-        if matches!(mode, NewContextWindowMode::MaybeStart)
+        if matches!(mode, NewContextWindowMode::StartIfRequested)
             && !self.auto_compact_window.take_new_context_window_request()
         {
             return None;
