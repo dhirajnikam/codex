@@ -71,6 +71,9 @@ pub struct InitializeResponse {
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentInfo {
     pub shell: ShellInfo,
+    /// Working directory inherited by the exec-server process.
+    #[serde(default)]
+    pub cwd: Option<PathUri>,
 }
 
 /// Shell detected for an execution/filesystem environment.
@@ -504,12 +507,33 @@ mod base64_bytes {
 
 #[cfg(test)]
 mod tests {
+    use super::EnvironmentInfo;
     use super::FsReadFileParams;
     use super::HttpRequestParams;
+    use super::ShellInfo;
     use codex_file_system::FileSystemSandboxContext;
     use codex_protocol::models::PermissionProfile;
     use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn environment_info_accepts_legacy_response_without_cwd() {
+        let info: EnvironmentInfo = serde_json::from_value(serde_json::json!({
+            "shell": { "name": "zsh", "path": "/bin/zsh" }
+        }))
+        .expect("legacy environment info should deserialize");
+
+        assert_eq!(
+            info,
+            EnvironmentInfo {
+                shell: ShellInfo {
+                    name: "zsh".to_string(),
+                    path: "/bin/zsh".to_string(),
+                },
+                cwd: None,
+            }
+        );
+    }
 
     #[test]
     fn filesystem_protocol_accepts_legacy_absolute_paths_and_serializes_path_uris() {
