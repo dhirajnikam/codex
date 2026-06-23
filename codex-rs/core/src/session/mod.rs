@@ -259,6 +259,12 @@ pub(crate) enum NewContextWindowMode {
     StartIfRequested,
 }
 
+/// Returns whether compaction should start a fresh context window instead of
+/// running local or remote summarization.
+pub(crate) fn token_budget_compaction_uses_new_context_window(turn_context: &TurnContext) -> bool {
+    turn_context.config.features.enabled(Feature::TokenBudget)
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
@@ -3404,6 +3410,16 @@ impl Session {
     pub(crate) async fn request_new_context_window(&self) {
         let mut state = self.state.lock().await;
         state.request_new_context_window();
+    }
+
+    /// Start a token-budget compaction window.
+    ///
+    /// Token-budget compaction intentionally behaves like the `new_context` tool:
+    /// it installs the standard injected context for a new window instead of
+    /// summarizing or carrying prior user/assistant transcript messages forward.
+    pub(crate) async fn start_token_budget_compaction_window(&self, turn_context: &TurnContext) {
+        self.start_new_context_window(turn_context, NewContextWindowMode::ForceStart)
+            .await;
     }
 
     pub(crate) async fn start_new_context_window(

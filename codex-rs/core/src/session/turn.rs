@@ -44,6 +44,7 @@ use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::session::token_budget_compaction_uses_new_context_window;
 use crate::session::turn_context::TurnContext;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::TurnItemContributorPolicy;
@@ -993,8 +994,8 @@ async fn run_auto_compact(
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
-    if turn_context.config.features.enabled(Feature::TokenBudget) {
-        sess.start_new_context_window(turn_context.as_ref(), NewContextWindowMode::ForceStart)
+    if token_budget_compaction_uses_new_context_window(turn_context.as_ref()) {
+        sess.start_token_budget_compaction_window(turn_context.as_ref())
             .await;
         return Ok(());
     }

@@ -4,11 +4,10 @@ use super::SessionTask;
 use super::SessionTaskContext;
 use super::SessionTaskResult;
 use super::emit_compact_metric;
-use crate::session::NewContextWindowMode;
 use crate::session::TurnInput;
+use crate::session::token_budget_compaction_uses_new_context_window;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
-use codex_features::Feature;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -35,7 +34,9 @@ impl SessionTask for CompactTask {
         _cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let session = session.clone_session();
-        if ctx.config.features.enabled(Feature::TokenBudget) {
+        if token_budget_compaction_uses_new_context_window(ctx.as_ref()) {
+            // Manual compaction still emits a turn lifecycle; token-budget
+            // compaction itself is a new-context-style window reset.
             let start_event = EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: ctx.sub_id.clone(),
                 trace_id: ctx.trace_id.clone(),
@@ -45,7 +46,7 @@ impl SessionTask for CompactTask {
             });
             session.send_event(&ctx, start_event).await;
             session
-                .start_new_context_window(ctx.as_ref(), NewContextWindowMode::ForceStart)
+                .start_token_budget_compaction_window(ctx.as_ref())
                 .await;
             return Ok(None);
         }
