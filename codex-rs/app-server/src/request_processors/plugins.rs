@@ -1447,7 +1447,10 @@ impl PluginRequestProcessor {
             marketplace_path,
         };
 
-        let result = match plugins_manager.install_plugin(request).await {
+        let result = match plugins_manager
+            .install_plugin_for_config(&config.plugins_config_input(), request)
+            .await
+        {
             Ok(result) => result,
             Err(err) => {
                 warn!(
@@ -1612,13 +1615,16 @@ impl PluginRequestProcessor {
             remote_plugin_catalog_error_to_jsonrpc(err, "install remote plugin")
         })?;
 
-        self.thread_manager
-            .plugins_manager()
-            .maybe_start_remote_installed_plugins_cache_refresh_after_mutation(
-                &config.plugins_config_input(),
-                auth.clone(),
-                Some(self.effective_plugins_changed_callback()),
-            );
+        let plugins_manager = self.thread_manager.plugins_manager();
+        plugins_manager
+            .reconcile_remote_plugin_install(&config.plugins_config_input(), &result.plugin_id)
+            .await
+            .map_err(Self::plugin_install_error)?;
+        plugins_manager.maybe_start_remote_installed_plugins_cache_refresh_after_mutation(
+            &config.plugins_config_input(),
+            auth.clone(),
+            Some(self.effective_plugins_changed_callback()),
+        );
 
         let plugin_metadata = self
             .thread_manager
