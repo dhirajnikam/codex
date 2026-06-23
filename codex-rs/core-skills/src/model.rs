@@ -47,6 +47,32 @@ impl SkillMetadata {
             None => true,
         }
     }
+
+    /// The set of tool names this skill is permitted to drive, if declared.
+    ///
+    /// Backed by the `allowed-tools` SKILL.md frontmatter field. This is the
+    /// skill's *contract* for tool access: callers that enforce it
+    /// must treat `None` as "unrestricted" and an empty slice as "no tools
+    /// permitted". Declaring the surface is decoupled from enforcing it; this
+    /// accessor exposes the contract so policy can be applied uniformly.
+    pub fn allowed_tools(&self) -> Option<&[String]> {
+        self.policy
+            .as_ref()
+            .and_then(|policy| policy.allowed_tools.as_deref())
+    }
+
+    /// Whether `tool_name` is permitted by this skill's declared tool surface.
+    ///
+    /// Returns `true` when no `allowed-tools` restriction is declared
+    /// (unrestricted), and otherwise `true` only when `tool_name` appears in
+    /// the declared allowlist. This is the single decision point an enforcer
+    /// should consult so the contract has exactly one meaning.
+    pub fn permits_tool(&self, tool_name: &str) -> bool {
+        match self.allowed_tools() {
+            None => true,
+            Some(allowed) => allowed.iter().any(|allowed| allowed == tool_name),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -55,6 +81,11 @@ pub struct SkillPolicy {
     // TODO: Enforce product gating in Codex skill selection/injection instead of only parsing and
     // storing this metadata.
     pub products: Vec<Product>,
+    /// Tool names this skill is permitted to drive (the `allowed-tools`
+    /// frontmatter field). `None` means unrestricted; an explicit (possibly empty) list
+    /// is the declared allowlist. Parsing and storage are decoupled from
+    /// enforcement — see `SkillMetadata::permits_tool`.
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
