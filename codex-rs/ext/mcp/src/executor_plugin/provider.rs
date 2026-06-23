@@ -1,5 +1,4 @@
 use codex_config::McpServerConfig;
-use codex_config::McpServerTransportConfig;
 use codex_core_plugins::ResolvedExecutorPlugin;
 use codex_exec_server::ExecutorFileSystem;
 use codex_mcp::PluginMcpServerPlacement;
@@ -39,7 +38,7 @@ pub(super) enum ExecutorPluginMcpProviderError {
 }
 
 impl ExecutorPluginMcpProvider {
-    /// Returns stdio servers declared by `plugin`, bound to its environment.
+    /// Returns MCP servers declared by `plugin`, bound to its environment.
     pub(super) async fn load(
         &self,
         plugin: &ResolvedExecutorPlugin,
@@ -120,21 +119,7 @@ async fn load_from_file_system(
         );
     }
 
-    Ok(parsed
-        .servers
-        .into_iter()
-        .filter_map(|(name, config)| match &config.transport {
-            McpServerTransportConfig::Stdio { .. } => Some((name, config)),
-            McpServerTransportConfig::StreamableHttp { .. } => {
-                tracing::warn!(
-                    plugin = plugin_id,
-                    server = name,
-                    "ignoring HTTP MCP server from executor plugin"
-                );
-                None
-            }
-        })
-        .collect())
+    Ok(parsed.servers.into_iter().collect())
 }
 
 #[cfg(test)]
