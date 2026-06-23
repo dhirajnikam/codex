@@ -4,6 +4,7 @@ use super::SessionTask;
 use super::SessionTaskContext;
 use super::SessionTaskResult;
 use super::emit_compact_metric;
+use crate::session::NewContextWindowMode;
 use crate::session::TurnInput;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
@@ -43,7 +44,9 @@ impl SessionTask for CompactTask {
                 collaboration_mode_kind: ctx.collaboration_mode.mode,
             });
             session.send_event(&ctx, start_event).await;
-            session.start_new_context_window(ctx.as_ref()).await;
+            session
+                .start_new_context_window(ctx.as_ref(), NewContextWindowMode::ForceStart)
+                .await;
             return Ok(None);
         }
 

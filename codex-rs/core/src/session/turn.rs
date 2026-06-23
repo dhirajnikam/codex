@@ -39,6 +39,7 @@ use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
+use crate::session::NewContextWindowMode;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -341,7 +342,10 @@ pub(crate) async fn run_turn(
                 .await;
 
                 let started_new_context_window = sess
-                    .maybe_start_new_context_window(turn_context.as_ref())
+                    .start_new_context_window(
+                        turn_context.as_ref(),
+                        NewContextWindowMode::MaybeStart,
+                    )
                     .await
                     .is_some();
                 if started_new_context_window && needs_follow_up {
@@ -990,7 +994,8 @@ async fn run_auto_compact(
     phase: CompactionPhase,
 ) -> CodexResult<()> {
     if turn_context.config.features.enabled(Feature::TokenBudget) {
-        sess.start_new_context_window(turn_context.as_ref()).await;
+        sess.start_new_context_window(turn_context.as_ref(), NewContextWindowMode::ForceStart)
+            .await;
         return Ok(());
     }
 

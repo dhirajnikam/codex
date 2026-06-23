@@ -12,6 +12,7 @@ use super::auto_compact_window::AutoCompactWindow;
 use super::auto_compact_window::AutoCompactWindowIds;
 use super::auto_compact_window::AutoCompactWindowSnapshot;
 use crate::context_manager::ContextManager;
+use crate::session::NewContextWindowMode;
 use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
 use crate::session::time_reminder::CurrentTimeReminderState;
@@ -172,24 +173,23 @@ impl SessionState {
         self.auto_compact_window.advance()
     }
 
-    pub(crate) fn start_new_context_window(&mut self) -> (u64, AutoCompactWindowIds) {
+    pub(crate) fn start_new_context_window(
+        &mut self,
+        mode: NewContextWindowMode,
+    ) -> Option<(u64, AutoCompactWindowIds)> {
+        if matches!(mode, NewContextWindowMode::MaybeStart)
+            && !self.auto_compact_window.take_new_context_window_request()
+        {
+            return None;
+        }
+
         let window = self.auto_compact_window.advance();
         self.auto_compact_window.clear_prefill();
-        window
+        Some(window)
     }
 
     pub(crate) fn request_new_context_window(&mut self) {
         self.auto_compact_window.request_new_context_window();
-    }
-
-    pub(crate) fn start_new_context_window_if_requested(
-        &mut self,
-    ) -> Option<(u64, AutoCompactWindowIds)> {
-        if !self.auto_compact_window.take_new_context_window_request() {
-            return None;
-        }
-
-        Some(self.start_new_context_window())
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {

@@ -251,6 +251,12 @@ use self::world_state::build_world_state_from_turn_context_item;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NewContextWindowMode {
+    ForceStart,
+    MaybeStart,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
@@ -3398,23 +3404,14 @@ impl Session {
         state.request_new_context_window();
     }
 
-    pub(crate) async fn start_new_context_window(&self, turn_context: &TurnContext) -> u64 {
-        let (window_number, window_ids) = {
-            let mut state = self.state.lock().await;
-            state.start_new_context_window()
-        };
-        self.install_new_context_window(turn_context, window_number, window_ids)
-            .await;
-        window_number
-    }
-
-    pub(crate) async fn maybe_start_new_context_window(
+    pub(crate) async fn start_new_context_window(
         &self,
         turn_context: &TurnContext,
+        mode: NewContextWindowMode,
     ) -> Option<u64> {
         let window = {
             let mut state = self.state.lock().await;
-            state.start_new_context_window_if_requested()
+            state.start_new_context_window(mode)
         };
         let (window_number, window_ids) = window?;
         self.install_new_context_window(turn_context, window_number, window_ids)
