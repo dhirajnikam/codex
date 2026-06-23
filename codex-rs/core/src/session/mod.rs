@@ -253,7 +253,7 @@ mod rollout_reconstruction_tests;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NewContextWindowMode {
-    /// Start a fresh context window even when no new-context request is pending.
+    /// Start a fresh context window regardless of whether a new-context request is pending.
     ForceStart,
     /// Start a fresh context window only if one was explicitly requested.
     MaybeStart,
