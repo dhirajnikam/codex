@@ -593,6 +593,39 @@ async fn total_byte_limit_truncates_later_project_docs() {
 }
 
 #[tokio::test]
+async fn agents_md_import_loads_in_subtree_but_rejects_escapes() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let proj = repo.path().join("proj");
+    fs::create_dir(&proj).unwrap();
+    // `.git` makes `proj` the project root, so discovery and imports are both
+    // anchored there.
+    fs::write(proj.join(".git"), "").unwrap();
+    fs::write(proj.join("shared.md"), "SHARED_GUIDANCE").unwrap();
+    // A secret living outside the project root must never be importable.
+    fs::write(repo.path().join("secret.md"), "TOP_SECRET").unwrap();
+    fs::write(
+        proj.join("AGENTS.md"),
+        "root doc\n@shared.md\n@../secret.md\n",
+    )
+    .unwrap();
+
+    let mut config = make_config(&repo, /*limit*/ 4096, /*instructions*/ None).await;
+    config.cwd = proj.abs();
+
+    let text = get_user_instructions(&config).await.expect("doc expected");
+
+    assert!(text.contains("root doc"), "base AGENTS.md should load");
+    assert!(
+        text.contains("SHARED_GUIDANCE"),
+        "an import within the project subtree should be expanded"
+    );
+    assert!(
+        !text.contains("TOP_SECRET"),
+        "an @import escaping the project root must be rejected, got: {text}"
+    );
+}
+
+#[tokio::test]
 async fn read_agents_md_propagates_metadata_errors() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;

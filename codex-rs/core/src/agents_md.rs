@@ -130,6 +130,10 @@ async fn read_agents_md(
         }
 
         let text = String::from_utf8_lossy(&data).to_string();
+        // Capture `@import` targets and the importing file's directory before
+        // `p`/`text` are moved into the entry below.
+        let import_targets = crate::agents_md_import::parse_import_directives(&text);
+        let base_dir = p.parent();
         if !text.trim().is_empty() {
             loaded.entries.push(InstructionEntry {
                 contents: text,
@@ -140,6 +144,72 @@ async fn read_agents_md(
                 },
             });
             remaining = remaining.saturating_sub(data.len() as u64);
+        }
+
+        // Expand `@import` directives so shared guidance can be factored into
+        // separate files and referenced from a top-level AGENTS.md. We
+        // resolve one level of imports relative to the importing file, which
+        // covers the common "root AGENTS.md pulls in a couple of shared docs"
+        // case without the cycle risk of unbounded nesting.
+        if let Some(base_dir) = base_dir {
+            for target in import_targets {
+                if remaining == 0 {
+                    break;
+                }
+                if target.starts_with('~') {
+                    // Home-relative imports need host expansion the loader does
+                    // not perform; skip rather than resolve them incorrectly.
+                    continue;
+                }
+                let import_path = match base_dir.join(&target) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        tracing::warn!(target = %target, "invalid @import path: {err}");
+                        continue;
+                    }
+                };
+                // Security boundary: an import must resolve to a file at or
+                // below the importing document's own directory. `PathUri::join`
+                // lets an absolute target replace the base and `..` walk upward,
+                // so without this check a crafted `@/etc/shadow` or
+                // `@../../.ssh/id_rsa` could inject files from outside the
+                // project into model-visible instructions. AGENTS.md discovery
+                // already stops at the project root; imports must not reach past
+                // their own subtree. Reject anything that escapes it.
+                if !import_path.starts_with(&base_dir) {
+                    tracing::warn!(
+                        target = %target,
+                        "ignoring @import that escapes the importing document's directory"
+                    );
+                    continue;
+                }
+                match fs.get_metadata(&import_path, /*sandbox*/ None).await {
+                    Ok(metadata) if metadata.is_file => {}
+                    Ok(_) => continue,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err),
+                }
+                let mut import_data = match fs.read_file(&import_path, /*sandbox*/ None).await {
+                    Ok(data) => data,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err),
+                };
+                if import_data.len() as u64 > remaining {
+                    import_data.truncate(remaining as usize);
+                }
+                let import_text = String::from_utf8_lossy(&import_data).to_string();
+                if !import_text.trim().is_empty() {
+                    loaded.entries.push(InstructionEntry {
+                        contents: import_text,
+                        provenance: InstructionProvenance::Project {
+                            source_path: import_path,
+                            environment_id: environment_id.to_string(),
+                            cwd: cwd.clone(),
+                        },
+                    });
+                    remaining = remaining.saturating_sub(import_data.len() as u64);
+                }
+            }
         }
     }
 
