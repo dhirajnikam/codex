@@ -3398,6 +3398,16 @@ impl Session {
         state.request_new_context_window();
     }
 
+    pub(crate) async fn start_new_context_window(&self, turn_context: &TurnContext) -> u64 {
+        let (window_number, window_ids) = {
+            let mut state = self.state.lock().await;
+            state.start_new_context_window()
+        };
+        self.install_new_context_window(turn_context, window_number, window_ids)
+            .await;
+        window_number
+    }
+
     pub(crate) async fn maybe_start_new_context_window(
         &self,
         turn_context: &TurnContext,
@@ -3407,6 +3417,17 @@ impl Session {
             state.start_new_context_window_if_requested()
         };
         let (window_number, window_ids) = window?;
+        self.install_new_context_window(turn_context, window_number, window_ids)
+            .await;
+        Some(window_number)
+    }
+
+    async fn install_new_context_window(
+        &self,
+        turn_context: &TurnContext,
+        window_number: u64,
+        window_ids: AutoCompactWindowIds,
+    ) {
         let world_state = self.build_world_state(turn_context).await;
         let context_items = self
             .build_initial_context_with_world_state(turn_context, &world_state)
@@ -3435,7 +3456,6 @@ impl Session {
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
         }
         self.recompute_token_usage(turn_context).await;
-        Some(window_number)
     }
 
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {

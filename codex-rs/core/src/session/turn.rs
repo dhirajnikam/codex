@@ -989,6 +989,11 @@ async fn run_auto_compact(
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
+    if turn_context.config.features.enabled(Feature::TokenBudget) {
+        sess.start_new_context_window(turn_context.as_ref()).await;
+        return Ok(());
+    }
+
     if should_use_remote_compact_task(turn_context.provider.info()) {
         if turn_context
             .config

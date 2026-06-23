@@ -18,6 +18,7 @@ use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_compact_json_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
@@ -395,19 +396,18 @@ async fn token_budget_context_uses_new_window_after_compaction() -> Result<()> {
     let responses = mount_sse_sequence(
         &server,
         vec![
-            sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
             sse(vec![
-                ev_response_created("resp-compact"),
-                ev_assistant_message("msg-compact", "compact summary"),
-                ev_completed("resp-compact"),
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg-1", "assistant before compact"),
+                ev_completed("resp-1"),
             ]),
             sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
         ],
     )
     .await;
+    let compact = mount_compact_json_once(&server, json!({ "output": [] })).await;
 
     let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
-    model_provider.name = "OpenAI-compatible test provider".to_string();
     model_provider.base_url = Some(format!("{}/v1", server.uri()));
     model_provider.supports_websockets = false;
 
@@ -415,6 +415,10 @@ async fn token_budget_context_uses_new_window_after_compaction() -> Result<()> {
         .with_config(move |config| {
             config.model_provider = model_provider;
             config.model_context_window = Some(CONFIGURED_CONTEXT_WINDOW);
+            config
+                .features
+                .disable(Feature::RemoteCompactionV2)
+                .expect("test config should allow disabling remote compaction v2");
             config
                 .features
                 .enable(Feature::TokenBudget)
@@ -432,14 +436,18 @@ async fn token_budget_context_uses_new_window_after_compaction() -> Result<()> {
     test.submit_turn("after compact").await?;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
+    assert!(
+        compact.requests().is_empty(),
+        "token budget compaction should not call server-side compaction"
+    );
 
     let thread_id = test.session_configured.thread_id;
     let initial_token_budget = token_budget_contexts(&requests[0]);
     assert_eq!(initial_token_budget.len(), 1);
     let (initial_first_window_id, initial_previous_window_id, initial_window_id) =
         token_budget_window_ids(&initial_token_budget[0], thread_id);
-    let post_compaction_token_budget = token_budget_contexts(&requests[2]);
+    let post_compaction_token_budget = token_budget_contexts(&requests[1]);
     assert_eq!(post_compaction_token_budget.len(), 1);
     let (
         post_compaction_first_window_id,
@@ -454,6 +462,18 @@ async fn token_budget_context_uses_new_window_after_compaction() -> Result<()> {
         Some(initial_window_id.as_str())
     );
     assert_ne!(post_compaction_window_id, initial_window_id);
+    assert!(
+        !requests[1].body_contains_text("before compact"),
+        "token budget compaction should drop prior user messages"
+    );
+    assert!(
+        !requests[1].body_contains_text("assistant before compact"),
+        "token budget compaction should drop prior assistant messages"
+    );
+    assert!(
+        requests[1].body_contains_text("after compact"),
+        "follow-up should still include the new turn input"
+    );
 
     Ok(())
 }
