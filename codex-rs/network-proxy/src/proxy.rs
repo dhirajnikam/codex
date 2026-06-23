@@ -1,6 +1,7 @@
 use crate::config;
 use crate::http_proxy;
 use crate::network_policy::NetworkPolicyDecider;
+use crate::network_policy::NetworkRequestContext;
 use crate::runtime::BlockedRequestObserver;
 use crate::runtime::ConfigState;
 use crate::runtime::unix_socket_permissions_supported;
@@ -16,6 +17,8 @@ use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -229,6 +232,7 @@ impl NetworkProxyBuilder {
             reserved_listeners,
             policy_decider: self.policy_decider,
             environment_proxies: Arc::new(Mutex::new(HashMap::new())),
+            execution_proxies: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }
@@ -330,6 +334,7 @@ struct EnvironmentProxyAddrs {
 
 struct EnvironmentProxy {
     addrs: EnvironmentProxyAddrs,
+    request_context: NetworkRequestContext,
     http_task: JoinHandle<Result<()>>,
     socks_task: Option<JoinHandle<Result<()>>>,
 }
@@ -345,6 +350,49 @@ pub struct NetworkProxy {
     reserved_listeners: Option<Arc<ReservedListeners>>,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
     environment_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
+    execution_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
+}
+
+/// Keeps an execution-scoped proxy route alive until the command tree exits.
+///
+/// Clones share one lease. Calling [`Self::close`] or dropping the final clone
+/// removes the route and aborts its listeners.
+#[derive(Clone)]
+pub struct NetworkProxyExecutionLease {
+    inner: Arc<NetworkProxyExecutionLeaseInner>,
+}
+
+struct NetworkProxyExecutionLeaseInner {
+    proxy: NetworkProxy,
+    execution_id: String,
+    closed: AtomicBool,
+}
+
+impl std::fmt::Debug for NetworkProxyExecutionLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkProxyExecutionLease")
+            .field("execution_id", &self.inner.execution_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl NetworkProxyExecutionLease {
+    /// Removes the execution-scoped route immediately.
+    pub fn close(&self) {
+        if !self.inner.closed.swap(true, Ordering::AcqRel) {
+            self.inner
+                .proxy
+                .release_execution_proxy(&self.inner.execution_id);
+        }
+    }
+}
+
+impl Drop for NetworkProxyExecutionLeaseInner {
+    fn drop(&mut self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.proxy.release_execution_proxy(&self.execution_id);
+        }
+    }
 }
 
 impl std::fmt::Debug for NetworkProxy {
@@ -389,6 +437,7 @@ pub const PROXY_URL_ENV_KEYS: &[&str] = &[
 
 pub const ALL_PROXY_ENV_KEYS: &[&str] = &["ALL_PROXY", "all_proxy"];
 pub const PROXY_ACTIVE_ENV_KEY: &str = "CODEX_NETWORK_PROXY_ACTIVE";
+const PROXY_EXECUTION_ID_ENV_KEY: &str = "CODEX_NETWORK_PROXY_EXECUTION_ID";
 pub const ALLOW_LOCAL_BINDING_ENV_KEY: &str = "CODEX_NETWORK_ALLOW_LOCAL_BINDING";
 const ELECTRON_GET_USE_PROXY_ENV_KEY: &str = "ELECTRON_GET_USE_PROXY";
 const NODE_USE_ENV_PROXY_ENV_KEY: &str = "NODE_USE_ENV_PROXY";
@@ -396,6 +445,7 @@ const NODE_USE_ENV_PROXY_ENV_KEY: &str = "NODE_USE_ENV_PROXY";
 const GIT_SSH_COMMAND_ENV_KEY: &str = "GIT_SSH_COMMAND";
 pub const PROXY_ENV_KEYS: &[&str] = &[
     PROXY_ACTIVE_ENV_KEY,
+    PROXY_EXECUTION_ID_ENV_KEY,
     ALLOW_LOCAL_BINDING_ENV_KEY,
     ELECTRON_GET_USE_PROXY_ENV_KEY,
     NODE_USE_ENV_PROXY_ENV_KEY,
@@ -610,6 +660,17 @@ impl NetworkProxy {
         NetworkProxyBuilder::default()
     }
 
+    /// Creates a lifecycle lease for a command's execution-scoped proxy route.
+    pub fn execution_lease(&self, execution_id: impl Into<String>) -> NetworkProxyExecutionLease {
+        NetworkProxyExecutionLease {
+            inner: Arc::new(NetworkProxyExecutionLeaseInner {
+                proxy: self.clone(),
+                execution_id: execution_id.into(),
+                closed: AtomicBool::new(false),
+            }),
+        }
+    }
+
     pub fn http_addr(&self) -> SocketAddr {
         self.http_addr
     }
@@ -691,11 +752,45 @@ impl NetworkProxy {
         Ok(())
     }
 
+    /// Applies a proxy route whose requests are attributed to one execution tree.
+    pub fn apply_to_env_for_execution(
+        &self,
+        env: &mut HashMap<String, String>,
+        environment_id: &str,
+        execution_id: &str,
+    ) -> Result<()> {
+        let addrs = self.execution_proxy_addrs(environment_id, execution_id)?;
+        self.apply_to_env_for_addrs(env, addrs);
+        env.insert(
+            PROXY_EXECUTION_ID_ENV_KEY.to_string(),
+            execution_id.to_string(),
+        );
+        Ok(())
+    }
+
     pub fn apply_to_env_for_optional_environment(
         &self,
         env: &mut HashMap<String, String>,
         environment_id: Option<&str>,
     ) -> Result<()> {
+        if let (Some(environment_id), Some(execution_id)) =
+            (environment_id, env.get(PROXY_EXECUTION_ID_ENV_KEY).cloned())
+        {
+            let execution_addrs = self
+                .execution_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&execution_id)
+                .filter(|proxy| {
+                    proxy.request_context.environment_id.as_deref() == Some(environment_id)
+                })
+                .map(|proxy| proxy.addrs);
+            if let Some(addrs) = execution_addrs {
+                self.apply_to_env_for_addrs(env, addrs);
+                return Ok(());
+            }
+            env.remove(PROXY_EXECUTION_ID_ENV_KEY);
+        }
         match environment_id {
             Some(environment_id) => self.apply_to_env_for_environment(env, environment_id),
             None => {
@@ -706,27 +801,55 @@ impl NetworkProxy {
     }
 
     fn environment_proxy_addrs(&self, environment_id: &str) -> Result<EnvironmentProxyAddrs> {
-        let mut proxies = self
-            .environment_proxies
+        self.scoped_proxy_addrs(
+            &self.environment_proxies,
+            environment_id,
+            NetworkRequestContext::for_environment(environment_id),
+            format!("environment `{environment_id}`"),
+        )
+    }
+
+    fn execution_proxy_addrs(
+        &self,
+        environment_id: &str,
+        execution_id: &str,
+    ) -> Result<EnvironmentProxyAddrs> {
+        self.scoped_proxy_addrs(
+            &self.execution_proxies,
+            execution_id,
+            NetworkRequestContext::for_execution(environment_id, execution_id),
+            format!("execution `{execution_id}`"),
+        )
+    }
+
+    fn scoped_proxy_addrs(
+        &self,
+        proxy_map: &Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
+        key: &str,
+        request_context: NetworkRequestContext,
+        description: String,
+    ) -> Result<EnvironmentProxyAddrs> {
+        let mut proxies = proxy_map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(proxy) = proxies.get(environment_id) {
+        if let Some(proxy) = proxies.get(key) {
+            anyhow::ensure!(
+                proxy.request_context == request_context,
+                "network proxy route `{key}` was reused with different attribution"
+            );
             return Ok(proxy.addrs);
         }
 
-        let runtime = tokio::runtime::Handle::try_current().with_context(|| {
-            format!("failed to create network proxy for environment `{environment_id}`")
-        })?;
-        let listeners =
-            reserve_loopback_ephemeral_listeners(self.socks_enabled).with_context(|| {
-                format!("failed to reserve network proxy for environment `{environment_id}`")
-            })?;
-        let http_addr = listeners.http_addr().with_context(|| {
-            format!("failed to read HTTP proxy address for environment `{environment_id}`")
-        })?;
-        let socks_addr = listeners.socks_addr(self.socks_addr).with_context(|| {
-            format!("failed to read SOCKS proxy address for environment `{environment_id}`")
-        })?;
+        let runtime = tokio::runtime::Handle::try_current()
+            .with_context(|| format!("failed to create network proxy for {description}"))?;
+        let listeners = reserve_loopback_ephemeral_listeners(self.socks_enabled)
+            .with_context(|| format!("failed to reserve network proxy for {description}"))?;
+        let http_addr = listeners
+            .http_addr()
+            .with_context(|| format!("failed to read HTTP proxy address for {description}"))?;
+        let socks_addr = listeners
+            .socks_addr(self.socks_addr)
+            .with_context(|| format!("failed to read SOCKS proxy address for {description}"))?;
         let addrs = EnvironmentProxyAddrs {
             http_addr,
             socks_addr,
@@ -736,16 +859,16 @@ impl NetworkProxy {
             socks_listener,
         } = listeners;
 
-        let environment_id = environment_id.to_string();
+        let stored_request_context = request_context.clone();
         let http_state = self.state.clone();
         let http_decider = self.policy_decider.clone();
-        let http_environment_id = Some(environment_id.clone());
+        let http_request_context = request_context.clone();
         let http_task = runtime.spawn(async move {
             http_proxy::run_http_proxy_with_std_listener(
                 http_state,
                 http_listener,
                 http_decider,
-                http_environment_id,
+                http_request_context,
             )
             .await
         });
@@ -753,7 +876,7 @@ impl NetworkProxy {
         let socks_task = if self.socks_enabled {
             let socks_state = self.state.clone();
             let socks_decider = self.policy_decider.clone();
-            let socks_environment_id = Some(environment_id.clone());
+            let socks_request_context = request_context;
             let socks5_udp_enabled = self.socks5_udp_enabled;
             socks_listener.map(|listener| {
                 runtime.spawn(async move {
@@ -761,7 +884,7 @@ impl NetworkProxy {
                         socks_state,
                         listener,
                         socks_decider,
-                        socks_environment_id,
+                        socks_request_context,
                         socks5_udp_enabled,
                     )
                     .await
@@ -772,14 +895,29 @@ impl NetworkProxy {
         };
 
         proxies.insert(
-            environment_id,
+            key.to_string(),
             EnvironmentProxy {
                 addrs,
+                request_context: stored_request_context,
                 http_task,
                 socks_task,
             },
         );
         Ok(addrs)
+    }
+
+    fn release_execution_proxy(&self, execution_id: &str) {
+        let proxy = self
+            .execution_proxies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(execution_id);
+        if let Some(proxy) = proxy {
+            proxy.http_task.abort();
+            if let Some(socks_task) = proxy.socks_task {
+                socks_task.abort();
+            }
+        }
     }
 
     pub async fn replace_config_state(&self, new_state: ConfigState) -> Result<()> {
@@ -849,7 +987,7 @@ impl NetworkProxy {
                         http_state,
                         listener,
                         http_decider,
-                        /*environment_id*/ None,
+                        NetworkRequestContext::default(),
                     )
                     .await
                 }
@@ -858,7 +996,7 @@ impl NetworkProxy {
                         http_state,
                         http_addr,
                         http_decider,
-                        /*environment_id*/ None,
+                        NetworkRequestContext::default(),
                     )
                     .await
                 }
@@ -877,7 +1015,7 @@ impl NetworkProxy {
                             socks_state,
                             listener,
                             socks_decider,
-                            /*environment_id*/ None,
+                            NetworkRequestContext::default(),
                             enable_socks5_udp,
                         )
                         .await
@@ -887,7 +1025,7 @@ impl NetworkProxy {
                             socks_state,
                             socks_addr,
                             socks_decider,
-                            /*environment_id*/ None,
+                            NetworkRequestContext::default(),
                             enable_socks5_udp,
                         )
                         .await
@@ -902,6 +1040,7 @@ impl NetworkProxy {
             http_task: Some(http_task),
             socks_task,
             environment_proxies: self.environment_proxies.clone(),
+            execution_proxies: self.execution_proxies.clone(),
             completed: false,
         })
     }
@@ -911,6 +1050,7 @@ pub struct NetworkProxyHandle {
     http_task: Option<JoinHandle<Result<()>>>,
     socks_task: Option<JoinHandle<Result<()>>>,
     environment_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
+    execution_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
     completed: bool,
 }
 
@@ -920,6 +1060,7 @@ impl NetworkProxyHandle {
             http_task: Some(tokio::spawn(async { Ok(()) })),
             socks_task: None,
             environment_proxies: Arc::new(Mutex::new(HashMap::new())),
+            execution_proxies: Arc::new(Mutex::new(HashMap::new())),
             completed: true,
         }
     }
@@ -934,6 +1075,7 @@ impl NetworkProxyHandle {
         };
         self.completed = true;
         abort_environment_proxies(self.environment_proxies.clone()).await;
+        abort_environment_proxies(self.execution_proxies.clone()).await;
         http_result??;
         if let Some(socks_result) = socks_result {
             socks_result??;
@@ -944,6 +1086,7 @@ impl NetworkProxyHandle {
     pub async fn shutdown(mut self) -> Result<()> {
         abort_tasks(self.http_task.take(), self.socks_task.take()).await;
         abort_environment_proxies(self.environment_proxies.clone()).await;
+        abort_environment_proxies(self.execution_proxies.clone()).await;
         self.completed = true;
         Ok(())
     }
@@ -987,9 +1130,11 @@ impl Drop for NetworkProxyHandle {
         let http_task = self.http_task.take();
         let socks_task = self.socks_task.take();
         let environment_proxies = self.environment_proxies.clone();
+        let execution_proxies = self.execution_proxies.clone();
         tokio::spawn(async move {
             abort_tasks(http_task, socks_task).await;
             abort_environment_proxies(environment_proxies).await;
+            abort_environment_proxies(execution_proxies).await;
         });
     }
 }
@@ -1077,7 +1222,6 @@ mod tests {
         ));
         let proxy = NetworkProxy::builder().state(state).build().await?;
         let handle = proxy.run().await?;
-
         let mut local_env = HashMap::new();
         proxy.apply_to_env_for_environment(&mut local_env, "local")?;
         let mut remote_env = HashMap::new();
@@ -1091,6 +1235,74 @@ mod tests {
         assert_ne!(
             remote_env.get("HTTP_PROXY"),
             Some(&format!("http://{}", proxy.http_addr()))
+        );
+
+        handle.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execution_proxy_routes_are_distinct_and_released_independently() -> Result<()> {
+        let state = Arc::new(network_proxy_state_for_policy(
+            NetworkProxySettings::default(),
+        ));
+        let proxy = NetworkProxy::builder().state(state).build().await?;
+        let handle = proxy.run().await?;
+        let first_lease = proxy.execution_lease("execution-1");
+        let second_lease = proxy.execution_lease("execution-2");
+
+        let mut first_env = HashMap::new();
+        proxy.apply_to_env_for_execution(&mut first_env, "local", "execution-1")?;
+        let mut second_env = HashMap::new();
+        proxy.apply_to_env_for_execution(&mut second_env, "local", "execution-2")?;
+        let mut repeated_first_env = HashMap::new();
+        proxy.apply_to_env_for_execution(&mut repeated_first_env, "local", "execution-1")?;
+
+        assert_ne!(first_env.get("HTTP_PROXY"), second_env.get("HTTP_PROXY"));
+        assert_eq!(
+            first_env.get("HTTP_PROXY"),
+            repeated_first_env.get("HTTP_PROXY")
+        );
+        assert_eq!(
+            first_env.get(PROXY_EXECUTION_ID_ENV_KEY),
+            Some(&"execution-1".to_string())
+        );
+        assert_eq!(
+            proxy
+                .execution_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            2
+        );
+        assert_eq!(
+            proxy
+                .execution_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get("execution-1")
+                .map(|proxy| proxy.request_context.clone()),
+            Some(NetworkRequestContext::for_execution("local", "execution-1"))
+        );
+
+        first_lease.close();
+
+        {
+            let execution_proxies = proxy
+                .execution_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(!execution_proxies.contains_key("execution-1"));
+            assert!(execution_proxies.contains_key("execution-2"));
+        }
+
+        drop(second_lease);
+        assert!(
+            proxy
+                .execution_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
         );
 
         handle.shutdown().await?;

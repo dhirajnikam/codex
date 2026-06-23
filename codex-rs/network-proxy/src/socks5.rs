@@ -9,6 +9,7 @@ use crate::network_policy::NetworkPolicyDecision;
 use crate::network_policy::NetworkPolicyRequest;
 use crate::network_policy::NetworkPolicyRequestArgs;
 use crate::network_policy::NetworkProtocol;
+use crate::network_policy::NetworkRequestContext;
 use crate::network_policy::emit_block_decision_audit_event;
 use crate::network_policy::evaluate_host_policy;
 use crate::policy::normalize_host;
@@ -64,7 +65,7 @@ pub async fn run_socks5(
     state: Arc<NetworkProxyState>,
     addr: SocketAddr,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
     enable_socks5_udp: bool,
 ) -> Result<()> {
     let listener = TcpListener::build()
@@ -79,7 +80,7 @@ pub async fn run_socks5(
         state,
         listener,
         policy_decider,
-        environment_id,
+        request_context,
         enable_socks5_udp,
     )
     .await
@@ -89,7 +90,7 @@ pub async fn run_socks5_with_std_listener(
     state: Arc<NetworkProxyState>,
     listener: StdTcpListener,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
     enable_socks5_udp: bool,
 ) -> Result<()> {
     let listener =
@@ -98,7 +99,7 @@ pub async fn run_socks5_with_std_listener(
         state,
         listener,
         policy_decider,
-        environment_id,
+        request_context,
         enable_socks5_udp,
     )
     .await
@@ -108,7 +109,7 @@ async fn run_socks5_with_listener(
     state: Arc<NetworkProxyState>,
     listener: TcpListener,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
     enable_socks5_udp: bool,
 ) -> Result<()> {
     let addr = listener
@@ -132,12 +133,12 @@ async fn run_socks5_with_listener(
     let tcp_connector = TargetCheckedTcpConnector::new(state.clone());
     let policy_tcp_connector = service_fn({
         let policy_decider = policy_decider.clone();
-        let environment_id = environment_id.clone();
+        let request_context = request_context.clone();
         move |req: TcpRequest| {
             let tcp_connector = tcp_connector.clone();
             let policy_decider = policy_decider.clone();
-            let environment_id = environment_id.clone();
-            async move { handle_socks5_tcp(req, tcp_connector, policy_decider, environment_id).await }
+            let request_context = request_context.clone();
+            async move { handle_socks5_tcp(req, tcp_connector, policy_decider, request_context).await }
         }
     });
 
@@ -152,13 +153,13 @@ async fn run_socks5_with_listener(
         let udp_decider = policy_decider.clone();
         let udp_relay =
             DefaultUdpRelay::default().with_async_inspector(service_fn({
-                let environment_id = environment_id.clone();
+                let request_context = request_context.clone();
                 move |request: RelayRequest| {
                     let udp_state = udp_state.clone();
                     let udp_decider = udp_decider.clone();
-                    let environment_id = environment_id.clone();
+                    let request_context = request_context.clone();
                     async move {
-                        inspect_socks5_udp(request, udp_state, udp_decider, environment_id).await
+                        inspect_socks5_udp(request, udp_state, udp_decider, request_context).await
                     }
                 }
             }));
@@ -178,7 +179,7 @@ async fn handle_socks5_tcp(
     req: TcpRequest,
     tcp_connector: TargetCheckedTcpConnector,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
 ) -> Result<EstablishedClientConnection<Socks5TcpConnection, TcpRequest>, BoxError> {
     let app_state = req
         .extensions()
@@ -226,6 +227,7 @@ async fn handle_socks5_tcp(
                     method: None,
                     mode: None,
                     protocol: "socks5".to_string(),
+                    execution_id: request_context.execution_id.clone(),
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -277,6 +279,7 @@ async fn handle_socks5_tcp(
                 method: None,
                 mode: Some(NetworkMode::Limited),
                 protocol: "socks5".to_string(),
+                execution_id: request_context.execution_id.clone(),
                 decision: Some(details.decision.as_str().to_string()),
                 source: Some(details.source.as_str().to_string()),
                 port: Some(port),
@@ -293,7 +296,8 @@ async fn handle_socks5_tcp(
         protocol: NetworkProtocol::Socks5Tcp,
         host: host.clone(),
         port,
-        environment_id,
+        environment_id: request_context.environment_id.clone(),
+        execution_id: request_context.execution_id.clone(),
         client_addr: client.clone(),
         method: None,
         command: None,
@@ -322,6 +326,7 @@ async fn handle_socks5_tcp(
                     method: None,
                     mode: None,
                     protocol: "socks5".to_string(),
+                    execution_id: request_context.execution_id.clone(),
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -385,6 +390,7 @@ async fn handle_socks5_tcp(
                 method: None,
                 mode: Some(mode),
                 protocol: "socks5".to_string(),
+                execution_id: request_context.execution_id.clone(),
                 decision: Some(details.decision.as_str().to_string()),
                 source: Some(details.source.as_str().to_string()),
                 port: Some(port),
@@ -400,13 +406,15 @@ async fn handle_socks5_tcp(
     if socks_needs_mitm && let Some(mitm_state) = mitm_state {
         let client = client.as_deref().unwrap_or_default();
         info!("SOCKS MITM enabled (client={client}, host={host}, port={port}, mode={mode:?})");
+        let mut extensions = Extensions::new();
+        extensions.insert(request_context);
         return Ok(EstablishedClientConnection {
             input: req,
             conn: Socks5TcpConnection::Mitm {
                 target,
                 mode,
                 mitm: mitm_state,
-                extensions: Extensions::new(),
+                extensions,
             },
         });
     }
@@ -530,11 +538,17 @@ async fn proxy_socks5_tcp(
             .await
             .map_err(Into::into),
         Socks5TcpConnection::Mitm {
-            target, mode, mitm, ..
+            target,
+            mode,
+            mitm,
+            extensions,
         } => {
             source.extensions_mut().insert(ProxyTarget(target));
             source.extensions_mut().insert(mode);
             source.extensions_mut().insert(mitm);
+            if let Some(request_context) = extensions.get::<NetworkRequestContext>().cloned() {
+                source.extensions_mut().insert(request_context);
+            }
             mitm::mitm_stream(source).await.map_err(Into::into)
         }
     }
@@ -544,7 +558,7 @@ async fn inspect_socks5_udp(
     request: RelayRequest,
     state: Arc<NetworkProxyState>,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
 ) -> io::Result<RelayResponse> {
     let RelayRequest {
         server_address,
@@ -591,6 +605,7 @@ async fn inspect_socks5_udp(
                     method: None,
                     mode: None,
                     protocol: "socks5-udp".to_string(),
+                    execution_id: request_context.execution_id.clone(),
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -633,6 +648,7 @@ async fn inspect_socks5_udp(
                     method: None,
                     mode: Some(NetworkMode::Limited),
                     protocol: "socks5-udp".to_string(),
+                    execution_id: request_context.execution_id.clone(),
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -651,7 +667,8 @@ async fn inspect_socks5_udp(
         protocol: NetworkProtocol::Socks5Udp,
         host: host.clone(),
         port,
-        environment_id,
+        environment_id: request_context.environment_id.clone(),
+        execution_id: request_context.execution_id.clone(),
         client_addr: client.clone(),
         method: None,
         command: None,
@@ -680,6 +697,7 @@ async fn inspect_socks5_udp(
                     method: None,
                     mode: None,
                     protocol: "socks5-udp".to_string(),
+                    execution_id: request_context.execution_id.clone(),
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -809,7 +827,7 @@ mod tests {
                 request,
                 TargetCheckedTcpConnector::new(state.clone()),
                 /*policy_decider*/ None,
-                /*environment_id*/ None,
+                NetworkRequestContext::default(),
             )
             .await
         })
@@ -853,7 +871,7 @@ mod tests {
             request,
             TargetCheckedTcpConnector::new(state),
             /*policy_decider*/ None,
-            /*environment_id*/ None,
+            NetworkRequestContext::default(),
         )
         .await
         .expect("limited-mode HTTPS should use MITM");
@@ -879,7 +897,7 @@ mod tests {
                 request,
                 TargetCheckedTcpConnector::new(state),
                 /*policy_decider*/ None,
-                /*environment_id*/ None,
+                NetworkRequestContext::default(),
             )
             .await
         })
@@ -925,7 +943,7 @@ mod tests {
             request,
             TargetCheckedTcpConnector::new(state),
             /*policy_decider*/ None,
-            /*environment_id*/ None,
+            NetworkRequestContext::default(),
         )
         .await
         .expect_err("limited-mode HTTPS requires MITM");
@@ -963,7 +981,7 @@ mod tests {
             request,
             TargetCheckedTcpConnector::new(state),
             /*policy_decider*/ None,
-            /*environment_id*/ None,
+            NetworkRequestContext::default(),
         )
         .await
         .expect("hooked HTTPS should use MITM");
@@ -998,7 +1016,7 @@ mod tests {
             request,
             TargetCheckedTcpConnector::new(state),
             /*policy_decider*/ None,
-            /*environment_id*/ None,
+            NetworkRequestContext::default(),
         )
         .await
         .expect_err("hooked non-HTTPS SOCKS should require MITM");
@@ -1025,7 +1043,10 @@ mod tests {
 
         let (result, events) = capture_events(|| async {
             inspect_socks5_udp(
-                request, state, /*policy_decider*/ None, /*environment_id*/ None,
+                request,
+                state,
+                /*policy_decider*/ None,
+                NetworkRequestContext::default(),
             )
             .await
         })

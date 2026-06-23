@@ -9,6 +9,7 @@ use crate::network_policy::NetworkPolicyDecision;
 use crate::network_policy::NetworkPolicyRequest;
 use crate::network_policy::NetworkPolicyRequestArgs;
 use crate::network_policy::NetworkProtocol;
+use crate::network_policy::NetworkRequestContext;
 use crate::network_policy::emit_allow_decision_audit_event;
 use crate::network_policy::emit_block_decision_audit_event;
 use crate::network_policy::evaluate_host_policy;
@@ -87,7 +88,7 @@ pub async fn run_http_proxy(
     state: Arc<NetworkProxyState>,
     addr: SocketAddr,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
 ) -> Result<()> {
     let listener = TcpListener::build()
         .bind(addr)
@@ -100,25 +101,25 @@ pub async fn run_http_proxy(
         .map_err(anyhow::Error::from)
         .with_context(|| format!("bind HTTP proxy: {addr}"))?;
 
-    run_http_proxy_with_listener(state, listener, policy_decider, environment_id).await
+    run_http_proxy_with_listener(state, listener, policy_decider, request_context).await
 }
 
 pub async fn run_http_proxy_with_std_listener(
     state: Arc<NetworkProxyState>,
     listener: StdTcpListener,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
 ) -> Result<()> {
     let listener =
         TcpListener::try_from(listener).context("convert std listener to HTTP proxy listener")?;
-    run_http_proxy_with_listener(state, listener, policy_decider, environment_id).await
+    run_http_proxy_with_listener(state, listener, policy_decider, request_context).await
 }
 
 async fn run_http_proxy_with_listener(
     state: Arc<NetworkProxyState>,
     listener: TcpListener,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
 ) -> Result<()> {
     ensure_rustls_crypto_provider();
 
@@ -136,9 +137,9 @@ async fn run_http_proxy_with_listener(
                 MethodMatcher::CONNECT,
                 service_fn({
                     let policy_decider = policy_decider.clone();
-                    let environment_id = environment_id.clone();
+                    let request_context = request_context.clone();
                     move |req| {
-                        http_connect_accept(policy_decider.clone(), environment_id.clone(), req)
+                        http_connect_accept(policy_decider.clone(), request_context.clone(), req)
                     }
                 }),
                 service_fn(http_connect_proxy),
@@ -147,8 +148,8 @@ async fn run_http_proxy_with_listener(
         )
             .into_layer(service_fn({
                 let policy_decider = policy_decider.clone();
-                let environment_id = environment_id.clone();
-                move |req| http_plain_proxy(policy_decider.clone(), environment_id.clone(), req)
+                let request_context = request_context.clone();
+                move |req| http_plain_proxy(policy_decider.clone(), request_context.clone(), req)
             })),
     );
 
@@ -162,7 +163,7 @@ async fn run_http_proxy_with_listener(
 
 async fn http_connect_accept(
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
     mut req: Request,
 ) -> Result<(Response, Request), Response> {
     let app_state = req
@@ -194,12 +195,15 @@ async fn http_connect_accept(
         warn!("CONNECT blocked; proxy disabled (client={client}, host={host})");
         return Err(proxy_disabled_response(
             &app_state,
-            host,
-            authority.port,
-            client_addr(&req),
-            Some("CONNECT".to_string()),
-            NetworkProtocol::HttpsConnect,
-            /*audit_endpoint_override*/ None,
+            ProxyDisabledResponseArgs {
+                host,
+                port: authority.port,
+                client: client_addr(&req),
+                method: Some("CONNECT".to_string()),
+                protocol: NetworkProtocol::HttpsConnect,
+                execution_id: request_context.execution_id.clone(),
+                audit_endpoint_override: None,
+            },
         )
         .await);
     }
@@ -208,7 +212,8 @@ async fn http_connect_accept(
         protocol: NetworkProtocol::HttpsConnect,
         host: host.clone(),
         port: authority.port,
-        environment_id,
+        environment_id: request_context.environment_id.clone(),
+        execution_id: request_context.execution_id.clone(),
         client_addr: client.clone(),
         method: Some("CONNECT".to_string()),
         command: None,
@@ -237,6 +242,7 @@ async fn http_connect_accept(
                     method: Some("CONNECT".to_string()),
                     mode: None,
                     protocol: "http-connect".to_string(),
+                    execution_id: request_context.execution_id.clone(),
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(authority.port),
@@ -308,6 +314,7 @@ async fn http_connect_accept(
                 method: Some("CONNECT".to_string()),
                 mode: Some(mode),
                 protocol: "http-connect".to_string(),
+                execution_id: request_context.execution_id.clone(),
                 decision: Some(details.decision.as_str().to_string()),
                 source: Some(details.source.as_str().to_string()),
                 port: Some(authority.port),
@@ -324,6 +331,7 @@ async fn http_connect_accept(
     req.extensions_mut()
         .insert(ConnectMitmEnabled(connect_needs_mitm));
     req.extensions_mut().insert(mode);
+    req.extensions_mut().insert(request_context);
     if connect_needs_mitm && let Some(mitm_state) = mitm_state {
         req.extensions_mut().insert(mitm_state);
     }
@@ -487,7 +495,7 @@ async fn forward_connect_tunnel(
 
 async fn http_plain_proxy(
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
-    environment_id: Option<String>,
+    request_context: NetworkRequestContext,
     mut req: Request,
 ) -> Result<Response, Infallible> {
     let app_state = match req.extensions().get::<Arc<NetworkProxyState>>().cloned() {
@@ -534,12 +542,15 @@ async fn http_plain_proxy(
             warn!("unix socket blocked; proxy disabled (client={client}, path={socket_path})");
             return Ok(proxy_disabled_response(
                 &app_state,
-                socket_path,
-                /*port*/ 0,
-                client_addr(&req),
-                Some(req.method().as_str().to_string()),
-                NetworkProtocol::Http,
-                Some(("unix-socket", 0)),
+                ProxyDisabledResponseArgs {
+                    host: socket_path,
+                    port: 0,
+                    client: client_addr(&req),
+                    method: Some(req.method().as_str().to_string()),
+                    protocol: NetworkProtocol::Http,
+                    execution_id: request_context.execution_id.clone(),
+                    audit_endpoint_override: Some(("unix-socket", 0)),
+                },
             )
             .await);
         }
@@ -679,12 +690,15 @@ async fn http_plain_proxy(
         warn!("request blocked; proxy disabled (client={client}, host={host}, method={method})");
         return Ok(proxy_disabled_response(
             &app_state,
-            host,
-            port,
-            client_addr(&req),
-            Some(req.method().as_str().to_string()),
-            NetworkProtocol::Http,
-            /*audit_endpoint_override*/ None,
+            ProxyDisabledResponseArgs {
+                host,
+                port,
+                client: client_addr(&req),
+                method: Some(req.method().as_str().to_string()),
+                protocol: NetworkProtocol::Http,
+                execution_id: request_context.execution_id.clone(),
+                audit_endpoint_override: None,
+            },
         )
         .await);
     }
@@ -693,7 +707,8 @@ async fn http_plain_proxy(
         protocol: NetworkProtocol::Http,
         host: host.clone(),
         port,
-        environment_id,
+        environment_id: request_context.environment_id.clone(),
+        execution_id: request_context.execution_id.clone(),
         client_addr: client.clone(),
         method: Some(req.method().as_str().to_string()),
         command: None,
@@ -722,6 +737,7 @@ async fn http_plain_proxy(
                     method: Some(req.method().as_str().to_string()),
                     mode: None,
                     protocol: "http".to_string(),
+                    execution_id: request_context.execution_id.clone(),
                     decision: Some(details.decision.as_str().to_string()),
                     source: Some(details.source.as_str().to_string()),
                     port: Some(port),
@@ -767,6 +783,7 @@ async fn http_plain_proxy(
                 method: Some(req.method().as_str().to_string()),
                 mode: Some(NetworkMode::Limited),
                 protocol: "http".to_string(),
+                execution_id: request_context.execution_id.clone(),
                 decision: Some(details.decision.as_str().to_string()),
                 source: Some(details.source.as_str().to_string()),
                 port: Some(port),
@@ -951,15 +968,29 @@ fn blocked_text_with_details(reason: &str, details: &PolicyDecisionDetails<'_>) 
     blocked_text_response_with_policy(reason, details)
 }
 
-async fn proxy_disabled_response(
-    app_state: &NetworkProxyState,
+struct ProxyDisabledResponseArgs<'a> {
     host: String,
     port: u16,
     client: Option<String>,
     method: Option<String>,
     protocol: NetworkProtocol,
-    audit_endpoint_override: Option<(&str, u16)>,
+    execution_id: Option<String>,
+    audit_endpoint_override: Option<(&'a str, u16)>,
+}
+
+async fn proxy_disabled_response(
+    app_state: &NetworkProxyState,
+    args: ProxyDisabledResponseArgs<'_>,
 ) -> Response {
+    let ProxyDisabledResponseArgs {
+        host,
+        port,
+        client,
+        method,
+        protocol,
+        execution_id,
+        audit_endpoint_override,
+    } = args;
     let (audit_server_address, audit_server_port) =
         audit_endpoint_override.unwrap_or((host.as_str(), port));
     emit_http_block_decision_audit_event(
@@ -984,6 +1015,7 @@ async fn proxy_disabled_response(
             method,
             mode: None,
             protocol: protocol.as_policy_protocol().to_string(),
+            execution_id,
             decision: Some("deny".to_string()),
             source: Some("proxy_state".to_string()),
             port: Some(port),
@@ -1087,7 +1119,9 @@ mod tests {
         req.extensions_mut().insert(state);
 
         let response = http_connect_accept(
-            /*policy_decider*/ None, /*environment_id*/ None, req,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
+            req,
         )
         .await
         .unwrap_err();
@@ -1119,7 +1153,9 @@ mod tests {
         req.extensions_mut().insert(state);
 
         let (response, _request) = http_connect_accept(
-            /*policy_decider*/ None, /*environment_id*/ None, req,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
+            req,
         )
         .await
         .unwrap();
@@ -1127,17 +1163,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_connect_accept_passes_environment_id_to_decider() {
+    async fn http_connect_accept_passes_request_context_to_decider() {
         let state = Arc::new(network_proxy_state_for_policy(
             NetworkProxySettings::default(),
         ));
-        let seen_environment_id = Arc::new(Mutex::new(None));
+        let seen_request_context = Arc::new(Mutex::new(None));
         let decider: Arc<dyn NetworkPolicyDecider> = Arc::new({
-            let seen_environment_id = seen_environment_id.clone();
+            let seen_request_context = seen_request_context.clone();
             move |request: NetworkPolicyRequest| {
-                *seen_environment_id
+                *seen_request_context
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = request.environment_id;
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some((request.environment_id, request.execution_id));
                 async { NetworkDecision::Allow }
             }
         });
@@ -1150,18 +1187,21 @@ mod tests {
             .unwrap();
         req.extensions_mut().insert(state);
 
-        let (response, _request) =
-            http_connect_accept(Some(decider), Some("remote".to_string()), req)
-                .await
-                .unwrap();
+        let (response, _request) = http_connect_accept(
+            Some(decider),
+            NetworkRequestContext::for_execution("remote", "execution-1"),
+            req,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            seen_environment_id
+            seen_request_context
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_deref(),
-            Some("remote")
+                .as_ref(),
+            Some(&(Some("remote".to_string()), Some("execution-1".to_string())))
         );
     }
 
@@ -1192,7 +1232,9 @@ mod tests {
         req.extensions_mut().insert(state);
 
         let response = http_connect_accept(
-            /*policy_decider*/ None, /*environment_id*/ None, req,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
+            req,
         )
         .await
         .unwrap_err();
@@ -1232,7 +1274,10 @@ mod tests {
             .local_addr()
             .expect("proxy listener should expose local addr");
         let proxy_task = tokio::spawn(run_http_proxy_with_std_listener(
-            state, listener, /*policy_decider*/ None, /*environment_id*/ None,
+            state,
+            listener,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
         ));
 
         let mut stream = tokio::net::TcpStream::connect(proxy_addr)
@@ -1284,7 +1329,9 @@ mod tests {
         req.extensions_mut().insert(state);
 
         let response = http_plain_proxy(
-            /*policy_decider*/ None, /*environment_id*/ None, req,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
+            req,
         )
         .await
         .unwrap();
@@ -1311,7 +1358,9 @@ mod tests {
         req.extensions_mut().insert(state);
 
         let response = http_plain_proxy(
-            /*policy_decider*/ None, /*environment_id*/ None, req,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
+            req,
         )
         .await
         .unwrap();
@@ -1345,7 +1394,9 @@ mod tests {
         req.extensions_mut().insert(state);
 
         let response = http_plain_proxy(
-            /*policy_decider*/ None, /*environment_id*/ None, req,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
+            req,
         )
         .await
         .unwrap();
@@ -1371,7 +1422,9 @@ mod tests {
         req.extensions_mut().insert(state);
 
         let response = http_connect_accept(
-            /*policy_decider*/ None, /*environment_id*/ None, req,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
+            req,
         )
         .await
         .unwrap_err();
@@ -1396,7 +1449,9 @@ mod tests {
         req.extensions_mut().insert(state);
 
         let response = http_plain_proxy(
-            /*policy_decider*/ None, /*environment_id*/ None, req,
+            /*policy_decider*/ None,
+            NetworkRequestContext::default(),
+            req,
         )
         .await;
         assert_eq!(response.unwrap().status(), StatusCode::BAD_REQUEST);
