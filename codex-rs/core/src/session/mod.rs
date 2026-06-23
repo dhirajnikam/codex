@@ -3420,6 +3420,9 @@ impl Session {
     /// Token-budget compaction intentionally behaves like the `new_context` tool:
     /// it installs the standard injected context for a new window instead of
     /// summarizing or carrying prior user/assistant transcript messages forward.
+    /// Unlike the `new_context` tool path, compaction is the request to reset
+    /// context, so it forces a new window rather than consuming a pending
+    /// new-context request.
     /// Returns `true` when the caller should skip normal local or remote compaction.
     pub(crate) async fn maybe_start_token_budget_compaction_window(
         &self,
