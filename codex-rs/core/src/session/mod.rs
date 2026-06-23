@@ -259,10 +259,12 @@ pub(crate) enum NewContextWindowMode {
     StartIfRequested,
 }
 
-/// Returns whether compaction should start a fresh context window instead of
-/// running local or remote summarization.
-pub(crate) fn token_budget_compaction_uses_new_context_window(turn_context: &TurnContext) -> bool {
-    turn_context.config.features.enabled(Feature::TokenBudget)
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TokenBudgetCompactionLifecycle {
+    /// Manual `/compact` starts its own turn lifecycle before resetting context.
+    ManualCompact,
+    /// Inline auto-compaction runs inside an existing turn lifecycle.
+    InlineAutoCompact,
 }
 
 #[derive(Debug, PartialEq)]
@@ -400,6 +402,7 @@ use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnModerationMetadataEvent;
+use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_tools::ToolEnvironmentMode;
@@ -3412,14 +3415,38 @@ impl Session {
         state.request_new_context_window();
     }
 
-    /// Start a token-budget compaction window.
+    /// Start a token-budget compaction window if token-budget mode is enabled.
     ///
     /// Token-budget compaction intentionally behaves like the `new_context` tool:
     /// it installs the standard injected context for a new window instead of
     /// summarizing or carrying prior user/assistant transcript messages forward.
-    pub(crate) async fn start_token_budget_compaction_window(&self, turn_context: &TurnContext) {
+    /// Returns `true` when the caller should skip normal local or remote compaction.
+    pub(crate) async fn maybe_start_token_budget_compaction_window(
+        &self,
+        turn_context: &TurnContext,
+        lifecycle: TokenBudgetCompactionLifecycle,
+    ) -> bool {
+        if !turn_context.config.features.enabled(Feature::TokenBudget) {
+            return false;
+        }
+
+        if let TokenBudgetCompactionLifecycle::ManualCompact = lifecycle {
+            self.send_event(
+                turn_context,
+                EventMsg::TurnStarted(TurnStartedEvent {
+                    turn_id: turn_context.sub_id.clone(),
+                    trace_id: turn_context.trace_id.clone(),
+                    started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
+                    model_context_window: turn_context.model_context_window(),
+                    collaboration_mode_kind: turn_context.collaboration_mode.mode,
+                }),
+            )
+            .await;
+        }
+
         self.start_new_context_window(turn_context, NewContextWindowMode::ForceStart)
             .await;
+        true
     }
 
     pub(crate) async fn start_new_context_window(

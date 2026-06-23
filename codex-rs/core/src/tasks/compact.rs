@@ -4,13 +4,11 @@ use super::SessionTask;
 use super::SessionTaskContext;
 use super::SessionTaskResult;
 use super::emit_compact_metric;
+use crate::session::TokenBudgetCompactionLifecycle;
 use crate::session::TurnInput;
-use crate::session::token_budget_compaction_uses_new_context_window;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
 use codex_protocol::error::CodexErr;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 
@@ -34,20 +32,15 @@ impl SessionTask for CompactTask {
         _cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let session = session.clone_session();
-        if token_budget_compaction_uses_new_context_window(ctx.as_ref()) {
-            // Manual compaction still emits a turn lifecycle; token-budget
-            // compaction itself is a new-context-style window reset.
-            let start_event = EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: ctx.sub_id.clone(),
-                trace_id: ctx.trace_id.clone(),
-                started_at: ctx.turn_timing_state.started_at_unix_secs().await,
-                model_context_window: ctx.model_context_window(),
-                collaboration_mode_kind: ctx.collaboration_mode.mode,
-            });
-            session.send_event(&ctx, start_event).await;
-            session
-                .start_token_budget_compaction_window(ctx.as_ref())
-                .await;
+        // Token-budget manual compaction starts a normal turn lifecycle, then
+        // resets to a fresh context window instead of summarizing history.
+        if session
+            .maybe_start_token_budget_compaction_window(
+                ctx.as_ref(),
+                TokenBudgetCompactionLifecycle::ManualCompact,
+            )
+            .await
+        {
             return Ok(None);
         }
 
