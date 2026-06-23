@@ -191,9 +191,13 @@ impl CodexErr {
             | CodexErr::Spawn
             | CodexErr::SessionConfiguredNotFirstEvent
             | CodexErr::UsageLimitReached(_)
-            | CodexErr::ServerOverloaded
             | CodexErr::CyberPolicy { .. } => false,
-            CodexErr::Stream(..)
+            // A server-overload (HTTP 503 `server_is_overloaded`/`slow_down`, or the
+            // equivalent `response.failed` stream error) is a transient backpressure
+            // signal, not a terminal condition. Treat it as retryable so the shared
+            // backoff loop reconnects instead of aborting the turn on the first blip.
+            CodexErr::ServerOverloaded
+            | CodexErr::Stream(..)
             | CodexErr::Timeout
             | CodexErr::RequestTimeout
             | CodexErr::UnexpectedStatus(_)
