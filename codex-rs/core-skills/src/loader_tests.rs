@@ -560,6 +560,7 @@ policy:
         Some(SkillPolicy {
             allow_implicit_invocation: Some(false),
             products: vec![],
+            allowed_tools: None,
         })
     );
     assert!(outcome.allowed_skills_for_implicit_invocation().is_empty());
@@ -592,6 +593,7 @@ policy: {}
         Some(SkillPolicy {
             allow_implicit_invocation: None,
             products: vec![],
+            allowed_tools: None,
         })
     );
     assert_eq!(
@@ -631,8 +633,77 @@ policy:
         Some(SkillPolicy {
             allow_implicit_invocation: None,
             products: vec![Product::Codex, Product::Chatgpt, Product::Atlas],
+            allowed_tools: None,
         })
     );
+}
+
+#[tokio::test]
+async fn loads_allowed_tools_list_from_frontmatter() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "allow-list",
+        "name: allow-list\ndescription: restricted\nallowed-tools:\n  - Bash\n  - Read\n  - Read\n",
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(outcome.skills.len(), 1);
+    let skill = &outcome.skills[0];
+    // Declaration order preserved, duplicate "Read" deduped.
+    assert_eq!(
+        skill.allowed_tools(),
+        Some(["Bash".to_string(), "Read".to_string()].as_slice())
+    );
+    assert!(skill.permits_tool("Bash"));
+    assert!(!skill.permits_tool("Write"));
+}
+
+#[tokio::test]
+async fn loads_allowed_tools_csv_from_frontmatter() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "allow-csv",
+        "name: allow-csv\ndescription: restricted\nallowed-tools: Bash, Read , Edit\n",
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(outcome.skills.len(), 1);
+    let skill = &outcome.skills[0];
+    assert_eq!(
+        skill.allowed_tools(),
+        Some(["Bash".to_string(), "Read".to_string(), "Edit".to_string()].as_slice())
+    );
+}
+
+#[tokio::test]
+async fn skill_without_allowed_tools_is_unrestricted() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    write_skill(&codex_home, "open", "open-skill", "no restriction");
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg).await;
+
+    assert_eq!(outcome.skills.len(), 1);
+    let skill = &outcome.skills[0];
+    assert_eq!(skill.allowed_tools(), None);
+    // `None` means unrestricted: every tool is permitted.
+    assert!(skill.permits_tool("AnyTool"));
 }
 
 #[tokio::test]
