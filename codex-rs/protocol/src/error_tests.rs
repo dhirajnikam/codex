@@ -113,6 +113,27 @@ fn server_overloaded_maps_to_protocol() {
 }
 
 #[test]
+fn server_overloaded_is_retryable() {
+    // A server-overload signal is transient backpressure; the stream loop should
+    // back off and retry rather than abort the turn on the first occurrence.
+    assert!(CodexErr::ServerOverloaded.is_retryable());
+}
+
+#[test]
+fn usage_limit_reached_is_not_retryable() {
+    // Guard against accidentally widening the retryable set: hitting a usage cap
+    // is terminal for the turn and must surface to the caller, not loop.
+    let err = CodexErr::UsageLimitReached(UsageLimitReachedError {
+        plan_type: None,
+        resets_at: None,
+        rate_limits: None,
+        promo_message: None,
+        rate_limit_reached_type: None,
+    });
+    assert!(!err.is_retryable());
+}
+
+#[test]
 fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
     let output = ExecToolCallOutput {
         exit_code: 77,
